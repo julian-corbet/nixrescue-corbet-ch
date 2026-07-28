@@ -92,6 +92,28 @@ a separate module's whole job, kept deliberately apart.
 See `docs/design.md` for the medium layout, the storage-format decision, and
 the boot-flow this module implements pieces of.
 
+## `examples/rescue` — a real, generic `nixosConfigurations.rescue`
+
+Not a host config, and not imported by anything else in this repo — an example composing this
+project's own module with `nixfs` (the repair toolchain), curated firmware, and the
+squashfs+tmpfs overlay store arrangement a slot boots into. `flake.nix` builds it as
+`nixosConfigurations.rescue`, and `checks/rescue-image-fits-slot.nix` squashes its real closure
+with the production `mksquashfs` invocation on every `nix flake check`, failing the build outright
+if it would not fit its declared slot. `nixrescue.gui.package` is left `null` here deliberately —
+the compositor choice is still open, and this project never picks one (see
+`modules/nixrescue.nix`'s own option doc).
+
+## `lib/firmware.nix` — curated firmware, not the whole redistributable set
+
+A reviewable list of whole vendor subtrees (AMD and Intel graphics, Intel and MediaTek wireless,
+CPU microcode), copied out of upstream `linux-firmware` rather than shipping the entire
+package via `hardware.enableRedistributableFirmware = true`. `mkCuratedFirmware` does the
+copying and closes three verified traps along the way — the flat driver-requested name that lives
+as a symlink one level above its vendor directory, the partial-vendor-directory trap of trimming
+inside a subtree once selected, and a cross-vendor symlink some OEM firmware uses to re-badge
+another vendor's blob. See the file's own header for all three, and `docs/design.md` for the
+short version.
+
 ## Testing
 
 `checks/rescue-vm-test.nix` boots a real, disposable QEMU VM

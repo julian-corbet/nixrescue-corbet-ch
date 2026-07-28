@@ -64,6 +64,47 @@ headless box that falls into rescue is therefore not reachable with its full
 identity until a human answers the prompt — accepted deliberately, and
 stated plainly rather than assumed away.
 
+## Firmware: curated, not the whole redistributable set
+
+`hardware.enableRedistributableFirmware = true` hands the kernel the entire upstream
+`linux-firmware` package — every vendor's blobs, for hardware a given rescue will never see.
+Inside an image sized to a small, fixed slot, that is not a rounding error; it is the largest
+single thing in the closure after the toplevel itself. `lib/firmware.nix` curates instead: a
+reviewable list of whole top-level vendor subtrees (the same shape nixfs keeps its own
+filesystem/tool catalogue as data), copied out of the upstream package via
+`hardware.enableRedistributableFirmware = false` plus `hardware.firmware = [ (curated
+derivation) ]`.
+
+Three traps, each verified against a real build, not assumed:
+
+- **The flat-name trap.** A driver requests firmware by a flat name
+  (`iwlwifi-so-a0-gf-a0-89.ucode`), never by its vendor-directory path. Upstream satisfies that
+  with a symlink sitting at the *top* of the firmware tree, pointing into the vendor directory
+  where the real bytes live. Copying the vendor directory copies the bytes; it does not copy the
+  sibling symlink that makes them reachable by the name the kernel actually asks for. The fix
+  resolves every top-level symlink whose target falls under a selected subtree and recreates it,
+  rather than hand-listing glob patterns that would silently miss whichever name someone didn't
+  think to type.
+- **The partial-vendor-directory trap.** Never trim inside a subtree once it is selected. A vendor
+  directory is one hardware generation's firmware next to the next generation's; a partially
+  curated directory looks identical to a complete one until the day a device stops binding, which
+  is the exact failure curation exists to prevent.
+- **The cross-vendor-symlink trap.** A selected directory's own internal symlinks are not
+  guaranteed to stay inside it — some OEM-branded firmware is a re-badge of a blob filed under a
+  different, unselected vendor directory entirely. Copying the selected directory whole still
+  copies that symlink, now pointing at nothing. The fix is general rather than a per-case
+  exception: any symlink that copies dangling gets dereferenced against the full, uncurated source
+  tree instead, which always resolves.
+
+## Size is a build-time gate, not a `dd`-time surprise
+
+`lib.mkMaintainer`'s own runtime check (`../lib/mkMaintainer.nix`) refuses to write an
+oversized image to its device — but only on a real host, against a real device that already
+exists. `checks/rescue-image-fits-slot.nix` moves the same check to build time: it builds the real
+squashfs from the real example closure, using the exact production `mksquashfs` invocation, and
+fails the *derivation* the moment that image would not fit its declared slot. An image that grows
+too fat to ship becomes a build failure here, long before anyone reaches for a `dd`.
+
 ## Headless and graphical, from one closure
 
 Every consumer boots to `multi-user.target` with sshd up; a graphical

@@ -9,9 +9,9 @@ This is also the open-questions ledger for this project's own judgment calls.
 Every entry below is a design choice that is *reasoned*, not yet *measured*
 against a real build — recorded so the difference stays visible.
 
-All open; nothing has been run yet.
+Two of the three below are now settled; #002 remains open.
 
-## 001 — a real UEFI boot path through `pkgs.testers.nixosTest`
+## 001 — a real UEFI boot path through `pkgs.testers.nixosTest` — SETTLED
 
 **Question:** `checks/rescue-vm-test.nix` boots the rescue's own NixOS
 configuration directly under QEMU, which needs no signed UKI, no boot
@@ -19,16 +19,12 @@ partition, no slot-selection pointer file. nixpkgs' own `qemu-vm.nix` also
 supports `useEFIBoot` and `useBootLoader`, which would let a test walk
 through real UEFI firmware, a real boot menu, and real slot selection.
 
-**Reasoning as it stands:** the harness is deliberately built to grow rather
-than arrive complete — a passing boot test beats an aspirational suite that
-never ships. The UEFI path also depends on a boot-arbitration module's own
-extra-entry mechanism, which does not exist yet; blocking this project's own
-tests on that would be exactly the kind of premature coupling its module
-split exists to avoid.
-
-**What would settle it:** the extra-entry mechanism landing anywhere in the
-family. Once a signed second UKI can be built and named, extending this
-harness with `useEFIBoot = true` is additive, not a redesign.
+**Settled.** `nixboot.extraEntries` landed upstream, and
+`checks/rescue-uefi-boot-vm-test.nix` now exercises exactly this: real OVMF
+firmware, a real signed-or-unsigned UKI, and both the pointer-honoured and
+fallback-on-bad-pointer slot-selection scenarios. See that file's own header
+for the full chain it proves and `checks/default.nix` for how it is wired
+into `nix flake check`.
 
 ## 002 — exercising the vault-unlock path end to end
 
@@ -56,11 +52,17 @@ generic terms; the actual byte budget for a real image (OS plus curated
 firmware) against a real slot size is a fleet-specific measurement this repo
 deliberately does not carry.
 
-**Reasoning as it stands:** shipping fleet byte-counts in a public repo
-would tie mechanism to topology, which this project's own house rule
-forbids. The mechanism (equal slot size, squashfs at level 22, a stated
-firmware curation strategy) is what's portable; the exact numbers are not.
+**Settled at the mechanism level.** `examples/rescue` is now a real, generic
+`nixosConfigurations.rescue` (nixrescue's own module, `nixfs`, curated
+firmware via `lib/firmware.nix`, and the overlay store arrangement), and
+`checks/rescue-image-fits-slot.nix` builds its real closure into a real
+squashfs with the production invocation and fails the *build* if it would
+not fit a declared slot size, on every `nix flake check`. That is the part
+that is portable and belongs in this repo.
 
-**What would settle it:** nothing, here — that measurement belongs in
-whichever consumer's own configuration actually sizes its slots, not in this
-repo.
+**What still does not belong here:** the actual byte counts a real consumer
+measures for a real slot on a real medium. Shipping fleet byte-counts in a
+public repo would tie mechanism to topology, which this project's own house
+rule forbids — that measurement belongs in whichever consumer's own
+configuration actually sizes its slots, taken by running the same check
+against that consumer's own toplevel and slot size.
