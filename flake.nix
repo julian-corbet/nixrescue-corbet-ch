@@ -13,6 +13,19 @@
     nixfs.url = "github:julian-corbet/nixfs-corbet-ch";
     nixfs.inputs.nixpkgs.follows = "nixpkgs";
 
+    # Used by `checks` only, to build the second UKI the real UEFI-boot VM
+    # test (checks/rescue-uefi-boot-vm-test.nix) places on its synthetic ESP.
+    # `nixboot.extraEntries` is the mechanism this project's own design
+    # record named as the critical-path dependency for that harness
+    # (docs/design.md, experiments/README.md #001) -- it has since landed
+    # upstream, which is what makes that test possible at all. Same
+    # boundary as nixfs above: a consumer of nixrescue.lib.mkMaintainer
+    # never needs this input, since materialising bytes onto a device and
+    # building/signing a UKI from them are deliberately two different
+    # projects' jobs (see lib/mkMaintainer.nix's own header).
+    nixboot.url = "github:julian-corbet/nixboot-corbet-ch";
+    nixboot.inputs.nixpkgs.follows = "nixpkgs";
+
     # NOT an input: system-manager. Unlike nixfs/nixram, nixrescue's own
     # module never runs on a non-NixOS host at all -- the rescue is always
     # real NixOS, regardless of what the main in front of it is (see
@@ -21,7 +34,7 @@
     # system involved and needs nothing from that flake either.
   };
 
-  outputs = { self, nixpkgs, nixfs }:
+  outputs = { self, nixpkgs, nixfs, nixboot }:
     let
       lib = nixpkgs.lib;
       supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
@@ -47,6 +60,7 @@
           inherit lib nixpkgs system;
           nixrescueModule = self.nixosModules.nixrescue;
           nixfsModule = nixfs.nixosModules.default;
+          nixbootModule = nixboot.nixosModules.default;
           mkMaintainer = self.lib.mkMaintainer;
         });
 

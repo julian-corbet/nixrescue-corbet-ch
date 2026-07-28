@@ -63,6 +63,26 @@
         "type": "github"
       }
     },
+    "nixboot": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1785213678,
+        "narHash": "sha256-GEGu6/jZBQHq6dnfCMZBi0arvUy4HdQi2tWK6cuuU5E=",
+        "owner": "julian-corbet",
+        "repo": "nixboot-corbet-ch",
+        "rev": "35a05d7d493efcd8d381c60cd250357c5544ea50",
+        "type": "github"
+      },
+      "original": {
+        "owner": "julian-corbet",
+        "repo": "nixboot-corbet-ch",
+        "type": "github"
+      }
+    },
     "nixfs": {
       "inputs": {
         "nixpkgs": [
@@ -132,6 +152,7 @@
     },
     "root": {
       "inputs": {
+        "nixboot": "nixboot",
         "nixfs": "nixfs",
         "nixpkgs": "nixpkgs"
       }
