@@ -43,11 +43,13 @@
   # created or expected -- squashfs is written directly to the device.
 , onCalendar ? "daily" # systemd calendar spec for the maintenance timer.
 , compressionLevel ? 22 # squashfs -Xcompression-level. 22 is the design
-  # record's own measured choice (mksquashfs -comp zstd
-  # -Xcompression-level 22 -b 1M): 566.8 MiB / 2.90x on the real ~1.6 GiB
-  # reference closure, in 26s -- erofs at the same level came out both
-  # larger AND ~23x slower in wall time, so squashfs is not a default
-  # picked for convenience.
+  # measured choice (mksquashfs -comp zstd -Xcompression-level 22
+  # -b 1M): roughly 2.9x on a rescue-shaped NixOS closure, in seconds
+  # rather than minutes -- erofs at the same level measured both larger
+  # AND an order of magnitude slower in wall time, so squashfs is not a
+  # default picked for convenience. 1M is squashfs's maximum block size;
+  # the trade is that reading one byte decompresses a whole megabyte,
+  # which is irrelevant for an image that is read into RAM once.
 }:
 
 let

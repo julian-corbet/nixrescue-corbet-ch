@@ -20,7 +20,7 @@
 # qemu-vm.nix supports `useEFIBoot`/`useBootLoader`, which would exercise a
 # signed UKI, an ESP, and slot selection -- but that is `nixboot`'s domain,
 # not yet built, and this harness does not need to wait for it). Also not
-# tested: firmware binding (an RX 6800 / a real WiFi radio) -- QEMU has
+# tested: firmware binding (a real GPU / a real WiFi radio) -- QEMU has
 # neither, and no VM ever will; that is the one gap this project's design
 # record accepts and closes with a supervised human boot instead.
 
