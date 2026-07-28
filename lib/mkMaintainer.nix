@@ -31,7 +31,7 @@
 #
 { pkgs
 , name # A short, stable identifier for this materialisation target (e.g.
-  # "slot-a", "elitebook") -- used for the stamp path and the systemd
+  # "slot-a", "stick-b") -- used for the stamp path and the systemd
   # unit description. Not interpreted otherwise.
 , toplevel # The rescue's own built system.build.toplevel, passed as a
   # derivation from the SAME flake evaluation as the main -- exactly the
