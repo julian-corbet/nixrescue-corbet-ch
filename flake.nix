@@ -26,6 +26,28 @@
     nixboot.url = "github:julian-corbet/nixboot-corbet-ch";
     nixboot.inputs.nixpkgs.follows = "nixpkgs";
 
+    # `examples/rescue`'s graphical session. Measures small (see
+    # examples/rescue/configuration.nix's own comment for the real numbers) with zero
+    # pipewire/llvm/ffmpeg in its closure -- the property that made it the pick over anything
+    # already in nixpkgs for a closure sized to a fixed slot budget. A consumer of
+    # `nixosModules.default` never needs this input either: `nixrescue.gui.package` is a bare
+    # package pointer (see modules/nixrescue.nix), and this repo's own module names no compositor
+    # -- only the EXAMPLE does, same as nixfs/nixboot above.
+    nixscroll.url = "github:julian-corbet/nixscroll-corbet-ch";
+    nixscroll.inputs.nixpkgs.follows = "nixpkgs";
+
+    # NOT an input: nixdesktop. The three-layer model this family's other desktop consumers use
+    # (a compositor repo owns its own config; nixdesktop owns policy plus a platform backend that
+    # resolves roles into packages) is exactly right for a rescue too, in principle -- but at the
+    # revision nixdesktop currently publishes, its policy profile still hardcodes
+    # `compositor = "niri"` with no free-form role and no escape hatch for a compositor with no
+    # nixpkgs package (scroll has none). Routing through it today would mean pulling niri itself
+    # into this closure just to reach the `terminal` role, which is precisely the bloat picking
+    # nixscroll for its size was meant to avoid. `examples/rescue/configuration.nix` therefore
+    # names `nixscroll`'s package and a plain terminal directly for now; the moment nixdesktop
+    # publishes a compositor-neutral policy+backend, that becomes the one-line swap the header
+    # comment there describes, and this input slots in alongside nixfs/nixboot the same way.
+    #
     # NOT an input: system-manager. Unlike nixfs/nixram, nixrescue's own
     # module never runs on a non-NixOS host at all -- the rescue is always
     # real NixOS, regardless of what the main in front of it is (see
@@ -34,7 +56,7 @@
     # system involved and needs nothing from that flake either.
   };
 
-  outputs = { self, nixpkgs, nixfs, nixboot }:
+  outputs = { self, nixpkgs, nixfs, nixboot, nixscroll }:
     let
       lib = nixpkgs.lib;
       supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
@@ -50,6 +72,10 @@
       # header documents.
       firmwareLib = import ./lib/firmware.nix { };
       curatedFirmware = firmwareLib.mkCuratedFirmware { pkgs = pkgsFor rescueSystem; };
+
+      # The example's graphical session -- see the `nixscroll` input comment above for why this
+      # is threaded straight through rather than routed via nixdesktop today.
+      rescueGuiPackage = nixscroll.packages.${rescueSystem}.scroll;
 
       # A representative slot size for checks/rescue-image-fits-slot.nix below -- illustrative,
       # not a measurement taken off any real medium. A real consumer sizes its own slot to its own
@@ -81,7 +107,7 @@
         system = rescueSystem;
         specialArgs = {
           nixfsLib = nixfs.lib;
-          inherit curatedFirmware;
+          inherit curatedFirmware rescueGuiPackage;
         };
         modules = [
           self.nixosModules.nixrescue

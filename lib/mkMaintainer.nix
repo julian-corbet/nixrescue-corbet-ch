@@ -39,7 +39,7 @@
   # at, e.g.:
   #   self.nixosConfigurations."<host>-rescue".config.system.build.toplevel
 , device # The raw block device or partition this materialises onto, e.g.
-  # "/dev/disk/by-partlabel/rescue-slot-a". No containing filesystem is
+  # "/dev/disk/by-partlabel/nixrescue-a". No containing filesystem is
   # created or expected -- squashfs is written directly to the device.
 , onCalendar ? "daily" # systemd calendar spec for the maintenance timer.
 , compressionLevel ? 22 # squashfs -Xcompression-level. 22 is the design

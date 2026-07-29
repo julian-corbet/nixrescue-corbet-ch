@@ -22,16 +22,17 @@
 #      spare box regardless of what is already in NVRAM" -- exactly this
 #      test's situation (a fresh OVMF vars store, every run).
 #   2. the initrd resolves WHICH slot to boot from a pointer file on the ESP
-#      -- `boot.initrd.postDeviceCommands`, below, reads
-#      /EFI/nixrescue/current and either honours it or falls back to
-#      probing in order. Both scenarios in this file are real, separate
-#      boots of two genuinely different disks, not two branches of the same
-#      script: "pointer-honoured" points at a slot that would NOT be picked
-#      by naive first-available probing, and "fallback-on-bad-pointer"
-#      names a slot with a deliberately invalid superblock. Either one, if
-#      the initrd script silently ignored the pointer/fallback logic, would
-#      mount the WRONG device -- caught by `findmnt`, not by trusting a log
-#      line.
+#      -- `nixrescue-resolve-slot`, an ordered `boot.initrd.systemd.services`
+#      oneshot below (systemd stage 1 has no `postDeviceCommands` -- see the
+#      note on that migration further down), reads /EFI/nixrescue/current
+#      and either honours it or falls back to probing in order. Both
+#      scenarios in this file are real, separate boots of two genuinely
+#      different disks, not two branches of the same script:
+#      "pointer-honoured" points at a slot that would NOT be picked by naive
+#      first-available probing, and "fallback-on-bad-pointer" names a slot
+#      with a deliberately invalid superblock. Either one, if the resolver
+#      silently ignored the pointer/fallback logic, would mount the WRONG
+#      device -- caught by `findmnt`, not by trusting a log line.
 #   3. mounts that slot's squashfs read-only            -- `mount -t
 #      squashfs`, no loop device (see the note on `loop` below).
 #   4. overlays tmpfs over it                           -- a real overlayfs
@@ -39,6 +40,19 @@
 #   5. switch_root into a working system reaching multi-user.target, with
 #      the Nix database actually populated (not an empty sqlite file that
 #      happens to sit next to a working store).
+#
+# SYSTEMD STAGE 1. This node boots with `boot.initrd.systemd.enable = true`
+# (this option's own upstream default at the revision this repo pins) --
+# scripted stage 1 is deprecated and scheduled for removal in NixOS 26.11, the
+# release this repo already tracks. `nixrescue-resolve-slot` (below) is the
+# `postDeviceCommands` replacement -- an ordered oneshot unit, since classic
+# stage 1's hook has no systemd-stage-1 equivalent at all (NixOS's own
+# assertion for it says so directly) -- and the three mounts below are raw
+# `boot.initrd.systemd.mounts` entries rather than `fileSystems.*`, so the
+# ordering between them is a real `after`/`requires` edge in the unit graph,
+# not whatever order a classic stage-1 script happened to mount things in.
+# Same shape as `../examples/rescue/overlay-store.nix`; see that file's own
+# header for the full reasoning, copied here rather than re-derived.
 #
 # THE OVERLAY MECHANISM IS NOT INVENTED HERE. It is NixOS's own live-media
 # machinery, copied from `nixos/modules/installer/cd-dvd/iso-image.nix`
@@ -144,8 +158,17 @@ pkgs.testers.nixosTest {
   name = "nixrescue-uefi-boot-and-slot-selection";
 
   nodes.machine =
-    { config, lib, ... }:
+    { config, lib, utils, ... }:
     let
+      # Same three paths (and the same escapeSystemdPath-derived unit names) as
+      # `../examples/rescue/overlay-store.nix` -- see that file's own header for the reasoning.
+      roStoreMount = "/sysroot/nix/.ro-store";
+      rwStoreMount = "/sysroot/nix/.rw-store";
+      nixStoreMount = "/sysroot/nix/store";
+      roStoreUnit = "${utils.escapeSystemdPath roStoreMount}.mount";
+      rwStoreUnit = "${utils.escapeSystemdPath rwStoreMount}.mount";
+      nixStoreUnit = "${utils.escapeSystemdPath nixStoreMount}.mount";
+
       # ── The UKI, built via nixboot's OWN extraEntries pipeline ───────────
       # A separate, throwaway nixosConfiguration -- NOT this node's own
       # module list -- purely so `nixboot.extraEntries.rescue.toplevel` can
@@ -232,7 +255,7 @@ pkgs.testers.nixosTest {
       # ── The synthetic disk: one ESP + two raw slot partitions ────────────
       # Single virtio-blk disk -> deterministic /dev/vda1 (ESP) /vda2
       # (slot-a) /vda3 (slot-b) partition numbering, so the initrd's own
-      # resolver script (postDeviceCommands, below) never needs blkid or
+      # resolver service (nixrescue-resolve-slot, below) never needs blkid or
       # partlabel lookups to find them.
       mkTestDisk =
         { name, pointerValue, corruptSlotA }:
@@ -266,8 +289,8 @@ pkgs.testers.nixosTest {
 
             sgdisk -o disk.img
             sgdisk -n "1:0:+''${espSizeMiB}MiB" -t 1:ef00 -c 1:NIXRESCUE-ESP disk.img
-            sgdisk -n "2:0:+''${slotSizeMiB}MiB" -t 2:8300 -c 2:nixrescue-slot-a disk.img
-            sgdisk -n "3:0:+''${slotSizeMiB}MiB" -t 3:8300 -c 3:nixrescue-slot-b disk.img
+            sgdisk -n "2:0:+''${slotSizeMiB}MiB" -t 2:8300 -c 2:nixrescue-a disk.img
+            sgdisk -n "3:0:+''${slotSizeMiB}MiB" -t 3:8300 -c 3:nixrescue-b disk.img
             sgdisk -p disk.img 1>&2
 
             p1=$(sgdisk -i 1 disk.img | awk '/^First sector:/ {print $3}')
@@ -341,57 +364,13 @@ pkgs.testers.nixosTest {
         device = "none";
         options = [ "mode=0755" ];
       };
-      fileSystems."/nix/.ro-store" = {
-        # No by-label/by-partlabel device here: WHICH slot backs this is
-        # resolved at boot by postDeviceCommands below, which points this
-        # at a fixed symlink it creates once slot selection is done --
-        # exactly the pattern LUKS/LVM's own device-mapper nodes already
-        # rely on (a stable logical name, populated before the mount unit
-        # that consumes it runs).
-        device = "/dev/nixrescue-active-slot";
-        fsType = "squashfs";
-        neededForBoot = true;
-      };
-      fileSystems."/nix/.rw-store" = {
-        fsType = "tmpfs";
-        options = [ "mode=0755" ];
-        neededForBoot = true;
-      };
-      # NixOS's stage 2 unconditionally self-bind-remounts /nix/store with
-      # `boot.nixStoreMountOpts` (default `["ro" "nodev" "nosuid"]`,
-      # nixos/modules/system/boot/stage-2-init.sh) as a store-immutability
-      # hardening feature completely UNRELATED to this project's own overlay
-      # -- and it applies regardless of what actually backs /nix/store,
-      # which is exactly what turned the writable overlay this test set up
-      # into a second, read-only bind mount stacked on top of it (found
-      # empirically: `findmnt` showed the SAME /nix/store target mounted
-      # twice, the second one "ro,nosuid,nodev"). A rescue image's whole
-      # point is a writable overlay, so this host opts out of the
-      # immutability hardening rather than fighting it.
-      boot.nixStoreMountOpts = [ ];
 
-      fileSystems."/nix/store" = {
-        # `neededForBoot` here is NOT optional the way it might look --
-        # "/nix/store" is unconditionally in NixOS's own `pathsNeededForBoot`
-        # (nixos/lib/utils.nix), so `boot.initrd`-side logic (including this
-        # overlay's own backing-directory creation, nixos/modules/tasks/
-        # filesystems/overlayfs.nix) already treats it as needed-for-boot
-        # regardless of this flag. Leaving the RAW flag unset here is what
-        # produced a genuine, reproducible double-mount under classic
-        # (non-systemd) stage 1: the initrd mounts the overlay correctly
-        # (rw), but stage 2 then mounts it a SECOND time on top with its own
-        # default (ro,nosuid,nodev) options, since stage 2's own unit
-        # generation does not independently know this path is implicitly
-        # covered. Setting the flag explicitly is what actually stops the
-        # second mount -- discovered empirically while building this test,
-        # not asserted from documentation.
-        neededForBoot = true;
-        overlay = {
-          lowerdir = [ "/nix/.ro-store" ];
-          upperdir = "/nix/.rw-store/store";
-          workdir = "/nix/.rw-store/work";
-        };
-      };
+      # This option's own upstream default at the revision this repo pins --
+      # stated explicitly because every service and mount below depends on
+      # it, not to restate a default for its own sake. See this file's own
+      # header ("SYSTEMD STAGE 1") and `../examples/rescue/overlay-store.nix`
+      # for the full reasoning behind this migration.
+      boot.initrd.systemd.enable = true;
 
       boot.initrd.availableKernelModules = [
         "squashfs"
@@ -403,71 +382,160 @@ pkgs.testers.nixosTest {
       # why a raw-partition slot needs none).
       boot.initrd.kernelModules = [ "overlay" ];
 
-      # Classic (non-systemd) stage 1, deliberately: `postDeviceCommands`
-      # is its hook for exactly this job (runs after udev has settled and
-      # every partition device exists, before `fileSystems` gets mounted --
-      # see nixos/modules/system/boot/stage-1-init.sh), and it keeps this
-      # test's own resolver script plain POSIX sh instead of a systemd-unit
-      # ordered against an escaped `/sysroot/nix/.ro-store.mount` name.
-      boot.initrd.systemd.enable = false;
+      # ── slot resolution: the postDeviceCommands replacement ─────────────
+      # Same ordering idiom as `../examples/rescue/overlay-store.nix`'s own
+      # `nixrescue-resolve-slot` (copied pattern, see that file's own
+      # comment for the ZFS-import-service precedent) -- this test's own
+      # resolver differs only in WHICH devices it looks at: fixed
+      # /dev/vda1/vda2/vda3 rather than by-label/by-partlabel, exactly as
+      # the classic-stage-1 version of this same test used before this
+      # migration (see this file's own header on why the two resolvers have
+      # never been byte-identical).
+      boot.initrd.systemd.services.nixrescue-resolve-slot = {
+        description = "nixrescue: resolve which cold-mode slot to boot from";
+        unitConfig.DefaultDependencies = false;
+        requiredBy = [ roStoreUnit ];
+        before = [ roStoreUnit "shutdown.target" ];
+        conflicts = [ "shutdown.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = ''
+          echo "nixrescue: resolving which cold-mode slot to boot from"
+          mkdir -p /mnt-esp /mnt-slot-test
 
-      boot.initrd.postDeviceCommands = ''
-        echo "nixrescue: resolving which cold-mode slot to boot from"
-        mkdir -p /mnt-esp /mnt-slot-test
-
-        pointer=""
-        if mount -t vfat -o ro /dev/vda1 /mnt-esp 2>/dev/null; then
-          if [ -r /mnt-esp/EFI/nixrescue/current ]; then
-            pointer=$(cat /mnt-esp/EFI/nixrescue/current 2>/dev/null | tr -d ' \t\r\n') || true
-          fi
-          umount /mnt-esp 2>/dev/null || true
-        else
-          echo "nixrescue: warning: could not mount the ESP to read the pointer file" >&2
-        fi
-
-        # "a slot is a valid superblock or it is not" -- the check IS the
-        # mount attempt, not a magic-number parse.
-        trySlot() {
-          mount -t squashfs -o ro "$1" /mnt-slot-test 2>/dev/null || return 1
-          umount /mnt-slot-test 2>/dev/null || true
-          return 0
-        }
-
-        candidate=""
-        case "$pointer" in
-          slot-a) candidate=/dev/vda2 ;;
-          slot-b) candidate=/dev/vda3 ;;
-          "") echo "nixrescue: no pointer file found on the ESP -- probing in order" ;;
-          *) echo "nixrescue: pointer names an unrecognised slot '$pointer' -- probing in order" ;;
-        esac
-
-        chosen=""
-        if [ -n "$candidate" ]; then
-          if trySlot "$candidate"; then
-            chosen="$candidate"
-            echo "nixrescue: pointer names '$pointer' ($candidate) -- honoured"
-          else
-            echo "nixrescue: pointer names '$pointer' ($candidate) but its superblock check FAILED -- falling back to probing"
-          fi
-        fi
-
-        if [ -z "$chosen" ]; then
-          for dev in /dev/vda2 /dev/vda3; do
-            if trySlot "$dev"; then
-              chosen="$dev"
-              echo "nixrescue: probing found a usable slot at $dev"
-              break
+          pointer=""
+          if mount -t vfat -o ro /dev/vda1 /mnt-esp 2>/dev/null; then
+            if [ -r /mnt-esp/EFI/nixrescue/current ]; then
+              pointer=$(cat /mnt-esp/EFI/nixrescue/current 2>/dev/null | tr -d ' \t\r\n') || true
             fi
-          done
-        fi
+            umount /mnt-esp 2>/dev/null || true
+          else
+            echo "nixrescue: warning: could not mount the ESP to read the pointer file" >&2
+          fi
 
-        if [ -z "$chosen" ]; then
-          echo "nixrescue: FATAL: no usable rescue slot found on any device" >&2
-        else
-          ln -sf "$chosen" /dev/nixrescue-active-slot
-          echo "nixrescue: active slot -> $chosen"
-        fi
-      '';
+          # "a slot is a valid superblock or it is not" -- the check IS the
+          # mount attempt, not a magic-number parse.
+          trySlot() {
+            mount -t squashfs -o ro "$1" /mnt-slot-test 2>/dev/null || return 1
+            umount /mnt-slot-test 2>/dev/null || true
+            return 0
+          }
+
+          candidate=""
+          case "$pointer" in
+            slot-a) candidate=/dev/vda2 ;;
+            slot-b) candidate=/dev/vda3 ;;
+            "") echo "nixrescue: no pointer file found on the ESP -- probing in order" ;;
+            *) echo "nixrescue: pointer names an unrecognised slot '$pointer' -- probing in order" ;;
+          esac
+
+          chosen=""
+          if [ -n "$candidate" ]; then
+            if trySlot "$candidate"; then
+              chosen="$candidate"
+              echo "nixrescue: pointer names '$pointer' ($candidate) -- honoured"
+            else
+              echo "nixrescue: pointer names '$pointer' ($candidate) but its superblock check FAILED -- falling back to probing"
+            fi
+          fi
+
+          if [ -z "$chosen" ]; then
+            for dev in /dev/vda2 /dev/vda3; do
+              if trySlot "$dev"; then
+                chosen="$dev"
+                echo "nixrescue: probing found a usable slot at $dev"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$chosen" ]; then
+            echo "nixrescue: FATAL: no usable rescue slot found on any device" >&2
+          else
+            ln -sf "$chosen" /dev/nixrescue-active-slot
+            echo "nixrescue: active slot -> $chosen"
+          fi
+        '';
+      };
+
+      # NixOS's stage 2 unconditionally self-bind-remounts /nix/store with
+      # `boot.nixStoreMountOpts` (default `["ro" "nodev" "nosuid"]`,
+      # nixos/modules/system/boot/stage-2-init.sh) as a store-immutability
+      # hardening feature completely UNRELATED to this project's own overlay
+      # -- and it applies regardless of what actually backs /nix/store, and
+      # regardless of which stage-1 flavour built it (stage 2 is the SAME
+      # activation payload either way). Left at its default, this is exactly
+      # what turned the writable overlay this test sets up into a second,
+      # read-only bind mount stacked on top of it (found empirically:
+      # `findmnt` showed the SAME /nix/store target mounted twice, the
+      # second one "ro,nosuid,nodev"). A rescue image's whole point is a
+      # writable overlay, so this host opts out of the immutability
+      # hardening rather than fighting it.
+      boot.nixStoreMountOpts = [ ];
+
+      # ── the overlay mounts themselves: explicit units, explicit ordering ─
+      # Raw `boot.initrd.systemd.mounts` entries, not `fileSystems.*` --
+      # same shape and same reasoning as
+      # `../examples/rescue/overlay-store.nix`'s own mounts list (see that
+      # file's own comment on why `where` therefore carries the literal
+      # `/sysroot` prefix, and why the overlay mount needs an explicit
+      # `after`/`requires` on the other two rather than relying on
+      # systemd's implicit mount-nesting).
+      boot.initrd.systemd.mounts = [
+        {
+          # No by-label/by-partlabel device here: WHICH slot backs this is
+          # resolved at boot by nixrescue-resolve-slot above, which points
+          # this at a fixed symlink it creates once slot selection is done
+          # -- exactly the pattern LUKS/LVM's own device-mapper nodes
+          # already rely on (a stable logical name, populated before the
+          # mount unit that consumes it runs).
+          where = roStoreMount;
+          what = "/dev/nixrescue-active-slot";
+          type = "squashfs";
+          options = "ro";
+        }
+        {
+          where = rwStoreMount;
+          what = "tmpfs";
+          type = "tmpfs";
+          options = "mode=0755";
+        }
+        {
+          where = nixStoreMount;
+          what = "overlay";
+          type = "overlay";
+          options = "lowerdir=${roStoreMount},upperdir=${rwStoreMount}/store,workdir=${rwStoreMount}/work";
+          after = [ roStoreUnit rwStoreUnit ];
+          requires = [ roStoreUnit rwStoreUnit ];
+          # The one unit here actually pulled into the boot transaction by
+          # name; ro-store and rw-store above are pulled in transitively
+          # through THIS unit's own `requires` immediately above.
+          requiredBy = [ "initrd-fs.target" ];
+          before = [ "initrd-fs.target" ];
+        }
+      ];
+
+      # overlayfs needs its upperdir/workdir to exist before the overlay
+      # mount is attempted -- same shape as
+      # `../examples/rescue/overlay-store.nix`'s own
+      # `nixrescue-prepare-overlay-dirs` (itself copied from NixOS's own
+      # `preMountService` in `nixos/modules/tasks/filesystems/overlayfs.nix`).
+      boot.initrd.systemd.services.nixrescue-prepare-overlay-dirs = {
+        description = "nixrescue: create the overlay's upper/work directories inside the rw store";
+        unitConfig = {
+          DefaultDependencies = false;
+          RequiresMountsFor = rwStoreMount;
+        };
+        requiredBy = [ nixStoreUnit ];
+        before = [ nixStoreUnit "shutdown.target" ];
+        conflicts = [ "shutdown.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${pkgs.coreutils}/bin/mkdir -p -m 0755 ${rwStoreMount}/store ${rwStoreMount}/work";
+        };
+      };
 
       # ── THE NIX DATABASE (copied pattern, see this file's own header) ──
       systemd.services.nixrescue-register-nix-paths = {

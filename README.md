@@ -63,7 +63,7 @@ let
     inherit pkgs;
     name = "slot-a";
     toplevel = self.nixosConfigurations."myhost-rescue".config.system.build.toplevel;
-    device = "/dev/disk/by-partlabel/rescue-slot-a";
+    device = "/dev/disk/by-partlabel/nixrescue-a";
   };
 in {
   systemd.services.nixrescue-maintain-slot-a = maintainer.service;
@@ -95,13 +95,17 @@ the boot-flow this module implements pieces of.
 ## `examples/rescue` — a real, generic `nixosConfigurations.rescue`
 
 Not a host config, and not imported by anything else in this repo — an example composing this
-project's own module with `nixfs` (the repair toolchain), curated firmware, and the
-squashfs+tmpfs overlay store arrangement a slot boots into. `flake.nix` builds it as
-`nixosConfigurations.rescue`, and `checks/rescue-image-fits-slot.nix` squashes its real closure
-with the production `mksquashfs` invocation on every `nix flake check`, failing the build outright
-if it would not fit its declared slot. `nixrescue.gui.package` is left `null` here deliberately —
-the compositor choice is still open, and this project never picks one (see
-`modules/nixrescue.nix`'s own option doc).
+project's own module with `nixfs` (the repair toolchain), curated firmware, the
+squashfs+tmpfs overlay store arrangement a slot boots into, and a graphical session. `flake.nix`
+builds it as `nixosConfigurations.rescue`, and `checks/rescue-image-fits-slot.nix` squashes its
+real closure with the production `mksquashfs` invocation on every `nix flake check`, failing the
+build outright if it would not fit its declared slot. `nixrescue.gui.package` is wired here to
+[nixscroll](https://github.com/julian-corbet/nixscroll-corbet-ch)'s `scroll` compositor, plus a
+plain `foot` terminal for it to spawn — this project's own module still never picks a compositor
+itself (see `modules/nixrescue.nix`'s own option doc); only this example does, and it fills no
+other role (no bar, no notifier, no file manager, no polkit agent, no audio). See
+`examples/rescue/configuration.nix`'s own comment for why that's wired directly rather than
+through nixdesktop's policy+backend split, for now.
 
 ## `lib/firmware.nix` — curated firmware, not the whole redistributable set
 

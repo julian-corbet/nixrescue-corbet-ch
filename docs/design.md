@@ -109,10 +109,26 @@ too fat to ship becomes a build failure here, long before anyone reaches for a `
 
 Every consumer boots to `multi-user.target` with sshd up; a graphical
 session is raised on demand at the console, never automatically. This
-project never names a compositor — the option is a bare package pointer,
-resolved with `lib.getExe`, and `null` means headless-only. Which compositor
-to point it at is the consumer's own open question, deliberately left open
-here.
+project's own module never names a compositor — `nixrescue.gui.package` is a
+bare package pointer, resolved with `lib.getExe`, and `null` means
+headless-only. Which compositor to point it at stays the consumer's own
+choice; nothing about the module changed to let `examples/rescue` make one.
+
+`examples/rescue` itself now makes that choice, through the same pointer:
+[nixscroll](https://github.com/julian-corbet/nixscroll-corbet-ch)'s `scroll`
+compositor, picked for its size (measured, not assumed: 440.9 MiB alone, 513
+MiB unioned with a terminal and a partition editor, zero pipewire/llvm/ffmpeg
+anywhere in its closure) plus a plain terminal (`foot`) for it to spawn. The
+example fills exactly those two roles and nothing else — no bar, no
+notifier, no file manager, no polkit agent, no audio — following the same
+compositor-repo-owns-its-config / policy-layer-owns-roles split this
+family's other desktop consumers use (nixdesktop plus a platform backend),
+threaded directly for now rather than through nixdesktop itself: at the
+revision nixdesktop currently publishes, its policy profile still hardcodes
+`compositor = "niri"` with no escape hatch for a compositor with no nixpkgs
+package, which is scroll's situation. See
+`examples/rescue/configuration.nix`'s own comment for the one-line swap this
+becomes once that lands.
 
 ## Testing philosophy — and its one honest gap
 
