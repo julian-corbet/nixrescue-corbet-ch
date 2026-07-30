@@ -75,7 +75,7 @@
 
     # No vault composed in this generic example -- packing one is nixvault's whole job, kept
     # deliberately apart (see ../../modules/nixrescue.nix's own SCOPE comment). A permanently
-    # LAN-only rescue with no fleet identity to unlock is a legitimate, safe choice on its own.
+    # LAN-only rescue with no cross-host identity to unlock is a legitimate, safe choice on its own.
   };
 
   # THE SECOND (AND LAST) ROLE THIS EXAMPLE FILLS: a terminal, so scroll's own default config has

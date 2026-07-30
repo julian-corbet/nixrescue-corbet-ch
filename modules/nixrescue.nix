@@ -104,7 +104,7 @@ in
           Which block device this rescue should attempt to open as its vault
           (a LUKS-to-squashfs container packed by nixvault) once it is up.
           `null`, the default, means this rescue has no vault composed at all:
-          a permanently LAN-only rescue with no fleet identity to unlock -- a
+          a permanently LAN-only rescue with no cross-host identity to unlock -- a
           legitimate, safe choice, not a degraded one.
 
           This option only knows WHICH device and HOW LONG to wait

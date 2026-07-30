@@ -49,7 +49,7 @@ candidate). Until then, a hand-rolled fixture here would be premature.
 
 **Question:** `docs/design.md` states the storage-format decision in
 generic terms; the actual byte budget for a real image (OS plus curated
-firmware) against a real slot size is a fleet-specific measurement this repo
+firmware) against a real slot size is a host-specific measurement this repo
 deliberately does not carry.
 
 **Settled at the mechanism level.** `examples/rescue` is now a real, generic
@@ -61,7 +61,7 @@ not fit a declared slot size, on every `nix flake check`. That is the part
 that is portable and belongs in this repo.
 
 **What still does not belong here:** the actual byte counts a real consumer
-measures for a real slot on a real medium. Shipping fleet byte-counts in a
+measures for a real slot on a real medium. Shipping host-specific byte-counts in a
 public repo would tie mechanism to topology, which this project's own house
 rule forbids — that measurement belongs in whichever consumer's own
 configuration actually sizes its slots, taken by running the same check
