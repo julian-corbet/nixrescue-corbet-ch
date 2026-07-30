@@ -151,9 +151,10 @@ in
       fi
 
       if [ -z "$chosen" ]; then
-        # `nixrescue*` matches BOTH shapes of the fleet naming rule: a medium with
-        # ONE slot names it `nixrescue`, a medium with several names them
-        # `nixrescue-a`/`-b`/`-c` (knowledge/fleet/shared/partition-naming.md).
+        # `nixrescue*` matches BOTH shapes of the partition naming rule: a medium
+        # with ONE slot names it `nixrescue`, a medium with several names them
+        # `nixrescue-a`/`-b`/`-c` -- the bare module name when it is alone,
+        # lettered when there are more than one.
         # The older `nixrescue-slot-*` glob matched neither the bare singular nor
         # anything actually deployed -- a stick carved as `nixrescue-a` would boot
         # this image and find no store at all, silently, because a glob that
