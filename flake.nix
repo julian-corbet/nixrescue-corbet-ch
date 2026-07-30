@@ -63,8 +63,8 @@
       forAllSystems = lib.genAttrs supportedSystems;
       pkgsFor = system: import nixpkgs { inherit system; };
 
-      # examples/rescue is x86_64-linux only -- the one architecture the fleet this project's
-      # design record is written against actually runs. Nothing about the mechanism is
+      # examples/rescue is x86_64-linux only -- the one architecture the hosts this project's
+      # design record is written against actually run. Nothing about the mechanism is
       # architecture-specific; there is simply nothing aarch64 to point it at yet.
       rescueSystem = "x86_64-linux";
 

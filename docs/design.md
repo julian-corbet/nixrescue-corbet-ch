@@ -1,7 +1,7 @@
 # Design notes
 
-The reasoning behind the two mechanisms this repo actually ships. Fleet
-specifics (which machine, which measurement was taken where) live outside
+The reasoning behind the two mechanisms this repo actually ships. Host-specific
+facts (which machine, which measurement was taken where) live outside
 this repo on purpose — everything below is the mechanism, portable to any
 consumer.
 
