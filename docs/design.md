@@ -40,6 +40,26 @@ off the block device. Equal slot size across every target medium is what
 lets one image be one artifact with one size budget; per-host content
 belongs in the vault, not in the rescue image itself.
 
+Slot COUNT, unlike slot size, is free to differ per medium, and what it
+varies is rollback depth: several slots keep older builds bootable while a
+new one lands, a single slot keeps none. That makes the count an operational
+decision rather than a shape detail. A medium with one slot has nothing to
+fall back to when an image turns out not to boot, so it should receive that
+image only after a medium that does has already booted it. The asymmetry is
+the safety mechanism, not an accident of whatever capacity each medium
+happened to have.
+
+Slots are found by partition name, which makes the naming rule part of this
+contract rather than a habit of whichever tool carved the medium. A
+partition takes the bare name of the module that owns its content
+(`nixrescue`, `nixvault`), and an `-a`/`-b`/`-c` suffix only on a medium
+carrying several of that same role. There is deliberately no `-slot`/`-part`
+infix: the GPT type code already says *what* a partition is, so the name
+only has to say *whose* it is. `examples/rescue`'s probe globs `nixrescue*`
+to match both shapes. A medium named any other way fails silently rather
+than loudly — a glob matching nothing expands to itself, every existence
+test on it then fails, and the image boots to no store at all.
+
 Slot selection resolves from a small pointer file on the boot partition,
 falling back to probing slots in order if it is missing or the named slot
 fails its own superblock check. "Boot the previous build" becomes editing
