@@ -154,6 +154,10 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # systemd-boot displays a UKI's os-release PRETTY_NAME. This rescue is
+    # NixOS-built, but its operator-facing boot identity is nixrescue.
+    system.nixos.extraOSReleaseArgs.PRETTY_NAME = "nixrescue";
+
     services.openssh = {
       enable = lib.mkDefault true;
       settings.PermitRootLogin = lib.mkDefault "prohibit-password";

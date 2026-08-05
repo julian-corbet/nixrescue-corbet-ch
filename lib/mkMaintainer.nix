@@ -14,11 +14,11 @@
 # is not):
 #   1. Skip entirely if the target's already-materialised toplevel (recorded
 #      in a stamp file under /var/lib) matches the one requested -- avoiding
-#      wear on flash media and a needless multi-minute mksquashfs run on
-#      every timer firing when nothing actually changed.
-#   2. Otherwise: `mksquashfs` the toplevel's full closure (every requisite,
-#      not just the toplevel path itself -- the closure is the thing that
-#      has to run), then `dd` the result onto the raw device.
+#      wear on flash media and a needless device rewrite on every timer
+#      firing when nothing actually changed.
+#   2. Otherwise: write a Nix-built squashfs of the toplevel's full closure
+#      (every requisite, not just the toplevel path itself -- the closure is
+#      the thing that has to run) onto the raw device.
 #   3. Refuse -- loudly, before writing a single byte -- if the built image
 #      would not fit the target device. A truncated rescue is worse than no
 #      rescue at all, because it LOOKS like one until the day it's needed.
@@ -53,13 +53,25 @@
 }:
 
 let
+  # NixOS's own live-media image builder produces the flat lower-store layout
+  # (`<hash>-<name>` at the squashfs root) and the nix-path-registration
+  # manifest that the rescue's overlay boot needs. Building it here keeps
+  # compression work on the configured builder, never on the receiving host.
+  makeSquashfs = pkgs.callPackage (pkgs.path + "/nixos/lib/make-squashfs.nix") { };
+  image = makeSquashfs {
+    fileName = "nixrescue-${name}";
+    storeContents = [ toplevel ];
+    comp = "zstd -Xcompression-level ${toString compressionLevel}";
+  };
+
   script = pkgs.writeShellApplication {
     name = "nixrescue-maintain-${name}";
-    runtimeInputs = [ pkgs.squashfsTools pkgs.nix pkgs.coreutils pkgs.util-linux ];
+    runtimeInputs = [ pkgs.coreutils pkgs.util-linux ];
     text = ''
       set -euo pipefail
 
       toplevel="${toplevel}"
+      image="${image}"
       device="${device}"
       stampdir="/var/lib/nixrescue/${name}"
       stampfile="$stampdir/last-materialized"
@@ -76,27 +88,10 @@ let
         exit 1
       }
 
-      workdir=$(mktemp -d)
-      trap 'rm -rf "$workdir"' EXIT
-      image="$workdir/rescue.squashfs"
-
-      # A staging tree, not a bare list of source paths handed straight to
-      # mksquashfs: mksquashfs merges each DIRECTORY argument's CONTENTS at
-      # the image root, so passing "/nix/store/hash-foo /nix/store/hash-bar"
-      # directly would scatter bin/, lib/, share/ from every requisite
-      # together at the top of the image -- not the "nix/store/hash-.../..."
-      # layout the closure actually needs to run. Building one real
-      # "nix/store/" tree first and squashing THAT single directory is what
-      # actually preserves it. `--reflink=auto` makes this cheap on a
-      # copy-on-write filesystem and merely correct (a real byte copy)
-      # everywhere else.
-      stageroot="$workdir/stage"
-      mkdir -p "$stageroot/nix/store"
-      # shellcheck disable=SC2046
-      cp -a --reflink=auto -t "$stageroot/nix/store/" $(nix-store --query --requisites "$toplevel")
-
-      mksquashfs "$stageroot" "$image" \
-        -comp zstd -Xcompression-level ${toString compressionLevel} -b 1M -noappend
+      [ -r "$image" ] || {
+        echo "nixrescue-maintain (${name}): pre-built image is absent: $image" >&2
+        exit 1
+      }
 
       size=$(stat -c%s "$image")
       devsize=$(blockdev --getsize64 "$device")
@@ -112,7 +107,7 @@ let
   };
 in
 {
-  inherit script;
+  inherit image script;
 
   # Ready to assign directly: `systemd.services.<anything> = result.service;`
   # on either a NixOS main or a system-manager main -- both understand this

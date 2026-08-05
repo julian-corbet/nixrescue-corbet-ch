@@ -76,25 +76,11 @@
 # device" -- so dropping `loop` here is fidelity to nixrescue's OWN design,
 # not a shortcut against the ISO module's.
 #
-# A GENUINE FINDING, not fixed here: `lib.mkMaintainer` (../lib/mkMaintainer.nix)
-# builds its squashfs by staging a "nix/store/<hash>/..." tree and squashing
-# that ONE directory with no `-keep-as-directory`, which merges the staged
-# tree's OWN CONTENTS at the image root -- so mounting its output gives you
-# "<mountpoint>/nix/store/<hash>/...", matching rescue-vm-test.nix's own
-# subtest (`mount ...; test -d /mnt/.../nix/store`). That is a DIFFERENT,
-# incompatible layout from the one this file needs: `/nix/.ro-store` must
-# BE the flat set of store paths (mounting it should give you
-# "<mountpoint>/<hash>/...", not "<mountpoint>/nix/store/<hash>/..."), or
-# the `/nix/store` overlay ends up double-nested
-# ("/nix/store/nix/store/<hash>"). This file therefore builds its own
-# squashfs directly from `nixos/lib/make-squashfs.nix` (which passes
-# absolute store paths plus `-keep-as-directory`, the layout the ISO module
-# itself relies on) rather than reusing `lib.mkMaintainer` -- the two
-# mechanisms materialise bytes onto a device for genuinely different mount
-# models, and only one of them is the overlay-booting one this project's own
-# design record describes in its boot-flow section. Worth reconciling in
-# `lib/mkMaintainer.nix` itself, but that is a separate, deliberate change
-# and out of scope for a test harness.
+# `lib.mkMaintainer` and this test intentionally use the same NixOS
+# `make-squashfs.nix` implementation. It keeps store paths flat at the image
+# root and emits `nix-path-registration`, exactly what the `/nix/.ro-store`
+# overlay expects. This test builds the image directly only to keep the VM's
+# boot assembly isolated from the host-side timer wrapper.
 #
 # WHY nixboot.enable STAYS AT ITS DEFAULT (false) on the booted node, while
 # `nixboot.extraEntries.rescue` is still declared: `system.build.

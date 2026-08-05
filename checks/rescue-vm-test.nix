@@ -146,8 +146,9 @@ pkgs.testers.nixosTest {
         machine.succeed("umount /mnt/nixrescue-test")
         machine.succeed("cryptsetup close nixrescue-test-broken")
 
-    with subtest("lib.mkMaintainer builds a real squashfs and writes it straight to the device"):
+    with subtest("lib.mkMaintainer writes its pre-built, bootable lower-store image straight to the device"):
         machine.succeed("test -b /dev/vdc")
+        machine.succeed("test -r ${maintainer.image}")
         machine.succeed("nixrescue-maintain-vm-test")
 
         # A second run against an unchanged toplevel must be a no-op --
@@ -157,7 +158,8 @@ pkgs.testers.nixosTest {
 
         machine.succeed("mkdir -p /mnt/nixrescue-materialized")
         machine.succeed("mount -t squashfs -o ro /dev/vdc /mnt/nixrescue-materialized")
-        machine.succeed("test -d /mnt/nixrescue-materialized/nix/store")
+        machine.succeed("test -f /mnt/nixrescue-materialized/nix-path-registration")
+        machine.fail("test -d /mnt/nixrescue-materialized/nix/store")
         machine.succeed("umount /mnt/nixrescue-materialized")
   '';
 }

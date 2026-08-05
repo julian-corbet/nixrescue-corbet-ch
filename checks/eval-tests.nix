@@ -97,6 +97,10 @@ let
       cfg-headless.services.openssh.enable
       "services.openssh.enable should default true under nixrescue.enable")
 
+    (check "the UKI menu title is nixrescue"
+      (cfg-headless.system.nixos.extraOSReleaseArgs.PRETTY_NAME == "nixrescue")
+      "the rescue os-release PRETTY_NAME must identify the boot entry as nixrescue")
+
     (check "builtAt with no default: enabling without setting it is a build failure"
       (evalFailsBuild { nixrescue.enable = true; })
       "nixrescue.enable without nixrescue.builtAt should fail to build (no default, by design)")
