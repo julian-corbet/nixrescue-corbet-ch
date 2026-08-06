@@ -5,6 +5,28 @@ facts (which machine, which measurement was taken where) live outside
 this repo on purpose — everything below is the mechanism, portable to any
 consumer.
 
+## Target composition boundary
+
+The common host model separates device class from boot role. `nixarch`,
+`nixnas`, and `nixvps` are device-class adapters; `primary` and `nixrescue`
+are boot roles. A container is an explicit no-boot case with no ESP or
+firmware actuator. The same intent should be visible across NixOS,
+system-manager, and Home Manager where the plane can participate, without
+inventing a Home Manager boot actuator.
+
+Within that model, nixrescue owns only recovery content and runtime. nixboot
+produces and verifies the UKI/ESP artifact around it. nixdeploy is the sole
+delivery specialist: scheduling, transport, materialization, slot rotation
+and selection, activation, rollback, reimage, and typed outcomes. The private
+composition selects the class and role and supplies every real host, disk,
+identity, endpoint, key, and production-policy fact.
+
+The current implementation predates the complete split. `lib.mkMaintainer`
+still writes a squashfs to a raw slot, and the UEFI test still implements slot
+selection locally. Those are current facts and useful regression coverage,
+but the target is to move delivery orchestration to nixdeploy rather than
+expand it here.
+
 ## Storage format: squashfs, not erofs, not f2fs
 
 The rescue image is one read-only artifact, read into RAM once and then
@@ -31,7 +53,7 @@ decompresses a whole megabyte" for the best ratio at that level — a real
 cost when loop-mounting for random access, irrelevant once the image is
 RAM-resident with pages cached after first touch.
 
-## Medium layout
+## Medium layout in the current implementation
 
 Raw partitions, one squashfs `dd`'d onto each — no containing filesystem.
 Nothing to fsck, nothing to corrupt in the ordinary sense: a slot is a valid
@@ -40,14 +62,12 @@ off the block device. Equal slot size across every target medium is what
 lets one image be one artifact with one size budget; per-host content
 belongs in the vault, not in the rescue image itself.
 
-Slot COUNT, unlike slot size, is free to differ per medium, and what it
+Slot count, unlike slot size, is free to differ per medium, and what it
 varies is rollback depth: several slots keep older builds bootable while a
 new one lands, a single slot keeps none. That makes the count an operational
-decision rather than a shape detail. A medium with one slot has nothing to
-fall back to when an image turns out not to boot, so it should receive that
-image only after a medium that does has already booted it. The asymmetry is
-the safety mechanism, not an accident of whatever capacity each medium
-happened to have.
+decision rather than a content detail. Under the target architecture,
+nixdeploy owns that decision and the rollout/rollback behavior around it;
+nixrescue only supplies the squashfs content to deliver.
 
 Slots are found by partition name, which makes the naming rule part of this
 contract rather than a habit of whichever tool carved the medium. A
@@ -60,15 +80,18 @@ to match both shapes. A medium named any other way fails silently rather
 than loudly — a glob matching nothing expands to itself, every existence
 test on it then fails, and the image boots to no store at all.
 
-Slot selection resolves from a small pointer file on the boot partition,
-falling back to probing slots in order if it is missing or the named slot
-fails its own superblock check. "Boot the previous build" becomes editing
-one small file, not re-flashing anything.
+Today slot selection resolves from a small pointer file on the boot
+partition, falling back to probing slots in order if it is missing or the
+named slot fails its own superblock check. That current mechanism is covered
+by the UEFI test. Its target owner is nixdeploy, together with materializing,
+rotating, activating, and rolling back the selected slot.
 
 ## Boot flow
 
 ```
-boot → rescue OS up from a plaintext slot        (zero crypto in the boot path)
+boot → nixboot-verified artifact hands off
+     → recovery content selected during deployment starts
+     → rescue OS up from a plaintext slot        (zero crypto in the content path)
      → ephemeral SSH host key + operator PUBLIC keys baked into the image
      → reachable on the network immediately        (a new host key is expected, not a warning sign)
      → a vault's passphrase, if one is configured, at the console or over SSH
@@ -118,12 +141,16 @@ Three traps, each verified against a real build, not assumed:
 
 ## Size is a build-time gate, not a `dd`-time surprise
 
-`lib.mkMaintainer`'s own runtime check (`../lib/mkMaintainer.nix`) refuses to write an
+`lib.mkMaintainer`'s current runtime check (`../lib/mkMaintainer.nix`) refuses to write an
 oversized image to its device — but only on a real host, against a real device that already
 exists. `checks/rescue-image-fits-slot.nix` moves the same check to build time: it builds the real
-squashfs from the real example closure, using the exact production `mksquashfs` invocation, and
+squashfs from the generic example closure, using the module's exact `mksquashfs` invocation, and
 fails the *derivation* the moment that image would not fit its declared slot. An image that grows
 too fat to ship becomes a build failure here, long before anyone reaches for a `dd`.
+
+The fit predicate remains a valid content/artifact check after the delivery
+move. The runtime write, schedule, target selection, and outcome reporting
+move to nixdeploy.
 
 ## Headless and graphical, from one closure
 
@@ -134,21 +161,13 @@ bare package pointer, resolved with `lib.getExe`, and `null` means
 headless-only. Which compositor to point it at stays the consumer's own
 choice; nothing about the module changed to let `examples/rescue` make one.
 
-`examples/rescue` itself now makes that choice, through the same pointer:
+`examples/rescue` makes that generic example choice through the same pointer:
 [nixscroll](https://github.com/julian-corbet/nixscroll-corbet-ch)'s `scroll`
-compositor, picked for its size (measured, not assumed: 440.9 MiB alone, 513
-MiB unioned with a terminal and a partition editor, zero pipewire/llvm/ffmpeg
-anywhere in its closure) plus a plain terminal (`foot`) for it to spawn. The
-example fills exactly those two roles and nothing else — no bar, no
-notifier, no file manager, no polkit agent, no audio — following the same
-compositor-repo-owns-its-config / policy-layer-owns-roles split this
-family's other desktop consumers use (nixdesktop plus a platform backend),
-threaded directly for now rather than through nixdesktop itself: at the
-revision nixdesktop currently publishes, its policy profile still hardcodes
-`compositor = "niri"` with no escape hatch for a compositor with no nixpkgs
-package, which is scroll's situation. See
-`examples/rescue/configuration.nix`'s own comment for the one-line swap this
-becomes once that lands.
+compositor plus a plain terminal (`foot`). The build-time size gate, rather
+than a production measurement copied into documentation, proves that the
+chosen example still fits its declared illustrative budget. The example
+fills no other desktop role; a real composition chooses its own payload and
+budget privately.
 
 ## Testing philosophy — and its one honest gap
 
