@@ -57,8 +57,7 @@ let
   # (`<hash>-<name>` at the squashfs root) and the nix-path-registration
   # manifest that the rescue's overlay boot needs. Building it here keeps
   # compression work on the configured builder, never on the receiving host.
-  makeSquashfs = pkgs.callPackage (pkgs.path + "/nixos/lib/make-squashfs.nix");
-  image = makeSquashfs {
+  image = pkgs.callPackage (pkgs.path + "/nixos/lib/make-squashfs.nix") {
     fileName = "nixrescue-${name}";
     storeContents = [ toplevel ];
     comp = "zstd -Xcompression-level ${toString compressionLevel}";

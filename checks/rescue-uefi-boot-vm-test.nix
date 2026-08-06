@@ -133,8 +133,6 @@ let
       };
     };
 
-  makeSquashfs = pkgs.callPackage (nixpkgs + "/nixos/lib/make-squashfs.nix");
-
   testPointerHonouredSlot = "slot-b";
   testFallbackPointerSlot = "slot-a"; # names the slot this file leaves corrupted
 
@@ -233,7 +231,7 @@ pkgs.testers.nixosTest {
       #    own header). Cheap compression: this is a disposable test
       #    build, not the production artifact (docs/design.md's own
       #    level-22 measurement is about the real image, not this one).
-      rescueSquashfs = makeSquashfs {
+      rescueSquashfs = pkgs.callPackage (nixpkgs + "/nixos/lib/make-squashfs.nix") {
         storeContents = [ config.system.build.toplevel ];
         comp = "zstd -Xcompression-level 3";
       };
