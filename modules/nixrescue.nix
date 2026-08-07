@@ -177,7 +177,10 @@ in
       ]
       ++ lib.optional (cfg.vault.device != null) (pkgs.writeShellApplication {
         name = "nixrescue-unlock-vault";
-        runtimeInputs = [ pkgs.cryptsetup pkgs.util-linux ];
+        # systemd for systemd-ask-password and coreutils for mkdir: neither is in cryptsetup or
+        # util-linux, and this script runs in a rescue environment where a bare 127 on the
+        # passphrase prompt is the worst possible time to discover a missing runtime input.
+        runtimeInputs = [ pkgs.cryptsetup pkgs.util-linux pkgs.systemd pkgs.coreutils ];
         text = ''
           device="${cfg.vault.device}"
           mapping="nixrescue-vault"
