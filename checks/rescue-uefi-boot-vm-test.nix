@@ -201,7 +201,6 @@ pkgs.testers.nixosTest {
 
       nixrescue = {
         enable = true;
-        builtAt = "2026-07-28T00:00:00Z";
         authorizedKeys = [ "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItest test-operator-key" ];
         ssh = {
           enable = true;
@@ -286,6 +285,14 @@ pkgs.testers.nixosTest {
               machine.wait_for_unit("sshd.service")
               machine.succeed("systemctl is-active sshd.service")
               machine.succeed("grep -q test-operator-key /etc/ssh/authorized_keys.d/root")
+
+          with subtest("the rescue reports the release identity authenticated by its UKI"):
+              release_info = machine.succeed("nixrescue-release-info")
+              cmdline = machine.succeed("cat /proc/cmdline")
+              values = dict(line.split("=", 1) for line in release_info.strip().splitlines())
+              assert f"nixrescue.imageSha256={values['image-sha256']}" in cmdline, release_info
+              assert f"nixrescue.imageSize={values['image-size']}" in cmdline, release_info
+              assert values["init"] == f"{toplevel}/init", release_info
 
           with subtest("the resolved slot is the one this scenario expects, not merely 'some' slot"):
               # `findmnt --target` reports one line per stacked mount at that

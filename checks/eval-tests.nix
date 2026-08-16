@@ -34,7 +34,7 @@ let
 
   check = name: ok: detail: { inherit name ok detail; };
 
-  cfg-headless = evalFor { nixrescue = { enable = true; builtAt = "2026-01-01T00:00:00Z"; }; };
+  cfg-headless = evalFor { nixrescue.enable = true; };
 
   guiStandIn = pkgs.writeShellApplication {
     name = "nixrescue-eval-test-session";
@@ -43,7 +43,6 @@ let
   cfg-gui = evalFor {
     nixrescue = {
       enable = true;
-      builtAt = "2026-01-01T00:00:00Z";
       gui.package = guiStandIn;
     };
   };
@@ -51,7 +50,6 @@ let
   cfg-keys = evalFor {
     nixrescue = {
       enable = true;
-      builtAt = "2026-01-01T00:00:00Z";
       authorizedKeys = [ "ssh-ed25519 AAAAtest operator" ];
       ssh.enable = true;
     };
@@ -60,7 +58,6 @@ let
   cfg-vault = evalFor {
     nixrescue = {
       enable = true;
-      builtAt = "2026-01-01T00:00:00Z";
       vault.device = "/dev/disk/by-partlabel/vault";
       vault.unlockTimeoutSec = 30;
     };
@@ -69,9 +66,19 @@ let
   results = [
     (check "disabled by default" (!(evalFor { }).nixrescue.enable) "nixrescue.enable defaulted to true")
 
-    (check "headless config builds (no gui, no vault, builtAt set)"
-      (!(evalFailsBuild { nixrescue = { enable = true; builtAt = "2026-01-01T00:00:00Z"; }; }))
+    (check "headless config builds with no per-materialisation input"
+      (!(evalFailsBuild { nixrescue.enable = true; }))
       "a minimal enabled config should not trip any of the module's own assertions")
+
+    (check "every rescue installs its authenticated release-info reader"
+      (lib.any (p: (p.pname or p.name or "") == "nixrescue-release-info")
+        cfg-headless.environment.systemPackages)
+      "nixrescue-release-info must expose the UKI-supplied digest, size and init path")
+
+    (check "the login banner points at authenticated identity, not a build timestamp"
+      (lib.hasInfix "nixrescue-release-info" cfg-headless.environment.etc."motd".text
+        && !(lib.hasInfix "built at" cfg-headless.environment.etc."motd".text))
+      "motd must route to signed release identity rather than a source-coupled timestamp")
 
     (check "headless config installs no gui launcher"
       (!(lib.any (p: (p.pname or p.name or "") == "nixrescue-launch-gui") cfg-headless.environment.systemPackages))
@@ -108,7 +115,6 @@ let
       (evalFailsBuild {
         nixrescue = {
           enable = true;
-          builtAt = "2026-01-01T00:00:00Z";
           ssh.enable = true;
         };
       })
@@ -118,15 +124,19 @@ let
       (cfg-headless.system.nixos.extraOSReleaseArgs.PRETTY_NAME == "nixrescue")
       "the rescue os-release PRETTY_NAME must identify the boot entry as nixrescue")
 
-    (check "builtAt with no default: enabling without setting it is a build failure"
-      (evalFailsBuild { nixrescue.enable = true; })
-      "nixrescue.enable without nixrescue.builtAt should fail to build (no default, by design)")
+    (check "the removed build timestamp has no compatibility surface"
+      (evalFailsBuild {
+        nixrescue = {
+          enable = true;
+          builtAt = "2026-01-01T00:00:00Z";
+        };
+      })
+      "nixrescue.builtAt must stay removed: freshness belongs to signed delivery state")
 
     (check "vault.device must look like an absolute /dev path"
       (evalFailsBuild {
         nixrescue = {
           enable = true;
-          builtAt = "2026-01-01T00:00:00Z";
           vault.device = "not-a-device-path";
         };
       })

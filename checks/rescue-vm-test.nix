@@ -43,7 +43,6 @@ pkgs.testers.nixosTest {
 
     nixrescue = {
       enable = true;
-      builtAt = "2026-07-28T00:00:00Z";
       authorizedKeys = [ "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItest test-operator-key" ];
       ssh = {
         enable = true;
@@ -97,6 +96,9 @@ pkgs.testers.nixosTest {
     with subtest("the GUI raise-on-demand pointer actually launches its target"):
         out = machine.succeed("nixrescue-launch-gui")
         assert "nixrescue-test-session" in out, out
+
+    with subtest("a direct kernel boot cannot fabricate UKI-authenticated release identity"):
+        machine.fail("nixrescue-release-info")
 
     with subtest("it can FIND, unlock and mount a synthetic broken disk (LUKS + btrfs)"):
         machine.succeed("test -b /dev/vdb")

@@ -19,7 +19,8 @@ The rescue IS a NixOS configuration; its payload is ordinary
 own config. This module exists only for the handful of things genuinely
 specific to being a rescue: a pointer to an optional graphical session, the
 operator's public keys, which device (if any) holds this host's vault and
-how long to wait for it, and a staleness stamp a human can actually read.
+how long to wait for it, and a command that reports the identity authenticated
+by the UKI that booted it.
 See `modules/nixrescue.nix` for the full option surface and its SCOPE block.
 
 **Two plain release functions.** `lib.mkRelease` builds one squashfs, hashes it, asks nixboot to
@@ -71,7 +72,6 @@ On the rescue's own configuration:
   imports = [ inputs.nixrescue.nixosModules.default inputs.nixrescue.nixosModules.overlayStore ];
   nixrescue = {
     enable = true;
-    builtAt = "2026-07-28T00:00:00Z"; # stamped by whatever builds this image
     authorizedKeys = [ "ssh-ed25519 AAAA... operator" ];
     ssh.enable = true; # TPM credential required by default; no fallback identity
     gui.package = null; # or a package whose one entrypoint raises a session
@@ -114,6 +114,13 @@ in {
 The signed manifest must name `release.bundle` exactly. The reconciler rejects any other argument;
 it is safe to run after every successful boot as well as through nixdeploy.
 
+The immutable image deliberately carries no wall-clock build timestamp. Nix evaluation cannot
+know one truthfully, and substituting a consumer repository's revision time makes unrelated
+consumer commits rewrite an otherwise identical rescue. At runtime, `nixrescue-release-info`
+instead reports the squashfs digest, byte length, and exact init path from the signed UKI command
+line. Publication age and last successful reconciliation are delivery facts and belong to the
+signed manifest and nixdeploy state, outside this content derivation.
+
 For a device with exactly one rescue partition, declare the geometry rather than inventing slots:
 
 ```nix
@@ -133,6 +140,7 @@ No `nixrescue.kernel.*` — the shared configuration chooses one broad kernel/mo
 write or Secure Boot enrollment — firmware ownership is a supervised ceremony. No transport,
 activation, reimage, or outcome model — nixdeploy owns those. The content-specific raw-slot and
 UKI-pair validation remains here in `mkReconciler`.
+No `nixrescue.builtAt` — content identity is cryptographic, while freshness is delivery state.
 No `apps.*`, no `desktop.enable` — a consumer wanting a tool in its rescue
 reaches for ordinary `environment.systemPackages` in its own configuration.
 No opinion on what a vault contains or how it's packed — this project only

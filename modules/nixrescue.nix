@@ -25,9 +25,8 @@
 #           systemd-stub (ssh.*); which
 #           device this rescue attempts to open as its vault and how long it
 #           waits for a passphrase before falling back to a local-only boot
-#           (vault.*); and a staleness stamp a human can read at the console,
-#           because the failure mode that actually kills a rescue is a
-#           quietly stale image, not a broken one (builtAt).
+#           (vault.*); and a local command that reads the authenticated release
+#           identity from the UKI-supplied kernel command line.
 #   NOT   : the kernel. Every rescue reuses its host's own stock
 #           `boot.kernelPackages` line, whatever the consumer's own
 #           `nixosConfigurations.<host>-rescue` already says. There is no
@@ -162,27 +161,6 @@ in
       };
     };
 
-    builtAt = lib.mkOption {
-      type = lib.types.str;
-      # Deliberately NO default -- see nixboot's `loader.efiVariables` for the
-      # same convention. This is a genuinely per-build fact, not a guess: Nix
-      # evaluation is pure and static, so a config that invented its own build
-      # time would be lying about the one fact this option exists to keep
-      # honest. Left unset, the reference to it below is what turns "forgot to
-      # stamp the build" into an eval-time failure instead of a silently blank
-      # banner nobody notices until the image is already stale.
-      example = "2026-07-28T00:00:00Z";
-      description = ''
-        An ISO-8601 timestamp, set by whatever materialises this image,
-        stamped into the built closure so a human at the console -- or a later
-        automated staleness alarm -- can tell how old THIS rescue actually is,
-        independent of when the main it sits in front of last rebuilt. There is
-        no default and never will be one: the failure mode that actually kills
-        a rescue is not a broken image but one that quietly stopped updating,
-        and a fabricated timestamp would defeat the one mechanism that makes
-        that visible.
-      '';
-    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -209,7 +187,54 @@ in
     users.users.root.openssh.authorizedKeys.keys = cfg.authorizedKeys;
 
     environment.systemPackages =
-      lib.optionals (cfg.gui.package != null) [
+      [
+        (pkgs.writeShellApplication {
+          name = "nixrescue-release-info";
+          runtimeInputs = [ pkgs.coreutils ];
+          text = ''
+            image_sha256=""
+            image_size=""
+            init_path=""
+
+            read -r -a cmdline_fields < /proc/cmdline
+            for field in "''${cmdline_fields[@]}"; do
+              case "$field" in
+                nixrescue.imageSha256=*) image_sha256="''${field#*=}" ;;
+                nixrescue.imageSize=*) image_size="''${field#*=}" ;;
+                init=*) init_path="''${field#*=}" ;;
+              esac
+            done
+
+            case "$image_sha256" in
+              *[!0-9a-f]*|"")
+                echo "nixrescue-release-info: UKI supplied no valid image SHA-256" >&2
+                exit 1
+                ;;
+            esac
+            if [ "''${#image_sha256}" -ne 64 ]; then
+              echo "nixrescue-release-info: UKI supplied a non-SHA-256 image digest" >&2
+              exit 1
+            fi
+            case "$image_size" in
+              *[!0-9]*|""|0)
+                echo "nixrescue-release-info: UKI supplied no valid image size" >&2
+                exit 1
+                ;;
+            esac
+            case "$init_path" in
+              /nix/store/*/init) ;;
+              *)
+                echo "nixrescue-release-info: UKI supplied no valid rescue init path" >&2
+                exit 1
+                ;;
+            esac
+
+            printf 'image-sha256=%s\nimage-size=%s\ninit=%s\n' \
+              "$image_sha256" "$image_size" "$init_path"
+          '';
+        })
+      ]
+      ++ lib.optionals (cfg.gui.package != null) [
         cfg.gui.package
         (pkgs.writeShellApplication {
           name = "nixrescue-launch-gui";
@@ -243,11 +268,9 @@ in
         '';
       });
 
-    # Staleness is the failure mode this option exists to make visible, so it
-    # is shown on every login rather than waiting to be asked for.
     environment.etc."motd".text = ''
 
-      nixrescue: this image was built at ${cfg.builtAt}
+      nixrescue: run nixrescue-release-info for the authenticated release identity
     '';
 
     assertions = [
@@ -260,19 +283,6 @@ in
         message = ''
           nixrescue.vault.device must be an absolute /dev path (a by-id or
           by-partlabel symlink under /dev is fine) -- got: ${toString cfg.vault.device}
-        '';
-      }
-      {
-        # Forces `cfg.builtAt` at the same shallow level NixOS already
-        # evaluates every other assertion, so a missing value fails here --
-        # cleanly, every time -- rather than however many derivation layers
-        # deep into `environment.etc."motd"` construction the option system's
-        # own "used but not defined" throw would otherwise first get forced.
-        assertion = cfg.builtAt != "";
-        message = ''
-          nixrescue.builtAt has no default and must be set explicitly by
-          whatever materialises this image -- see the option's own
-          description for why.
         '';
       }
     ];

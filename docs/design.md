@@ -85,6 +85,20 @@ then checks the pathname and `nix-path-registration`. A store pathname is not an
 an attacker can manufacture it inside another squashfs. The ESP pointer is only a performance hint
 among digest-compatible slots.
 
+## Release identity is content; freshness is delivery state
+
+The rescue closure contains no build timestamp. In a pure build, a wall-clock timestamp would be
+fabricated; using a consumer flake's last-modified time instead would turn every unrelated consumer
+commit into a new rescue image. Neither value says when the immutable bytes were actually
+published or last reconciled.
+
+The signed UKI already authenticates the useful runtime identity: squashfs SHA-256, byte length,
+and exact init path. `nixrescue-release-info` reads those fields from `/proc/cmdline` and fails
+closed when they are absent or malformed. Publication age, selected target revision, and the last
+coherent reconciliation outcome remain manifest and nixdeploy concerns. This keeps identical
+content at an identical store path while still making delivery staleness observable at the layer
+that can know it truthfully.
+
 ## Boot flow
 
 ```

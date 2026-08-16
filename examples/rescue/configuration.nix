@@ -25,12 +25,6 @@
   nixrescue = {
     enable = true;
 
-    # A real materialisation pipeline stamps this at build time from whatever tool produces the
-    # image (see ../../modules/nixrescue.nix's own option doc for why there is deliberately no
-    # default). Fixed here only so this EXAMPLE evaluates and builds standalone -- a real consumer
-    # overrides it, every build, never reuses this value.
-    builtAt = "2026-07-28T00:00:00Z";
-
     # The operator supplies their own PUBLIC keys; none are baked into an example that ships to
     # every clone of this repo. Empty means console-only until a vault (if one is composed at all,
     # which this example deliberately does not) brings up a real identity -- see
