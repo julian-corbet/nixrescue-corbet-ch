@@ -14,7 +14,7 @@
 #   - `nixrescueModule`         -- this project's own runtime contract (sshd, operator keys, the
 #                                  optional GUI pointer, an optional vault). See ../../modules/nixrescue.nix.
 #   - `nixfsModule`             -- the repair toolchain, pinned from nixpkgs regardless of distro.
-#   - `./overlay-store.nix`     -- the squashfs+tmpfs overlay store arrangement a slot boots into.
+#   - `nixosModules.overlayStore` -- the squashfs+tmpfs overlay store arrangement a slot boots into.
 #   - curated firmware          -- see ../../lib/firmware.nix; wired in below via `hardware.firmware`.
 #   - `rescueGuiPackage`        -- nixscroll's `scroll` package (flake.nix's own `rescueGuiPackage`
 #                                  binding); wired in below via `nixrescue.gui.package`.
@@ -36,6 +36,7 @@
     # which this example deliberately does not) brings up a real identity -- see
     # ../../modules/nixrescue.nix's own option doc.
     authorizedKeys = [ ];
+    ssh.enable = false;
 
     # THE COMPOSITOR: nixscroll's `scroll` (github:julian-corbet/nixscroll-corbet-ch), through
     # this project's own module-level pointer -- no second option added, per this module's own
@@ -97,9 +98,9 @@
     # (which stays on, since it lives in a different tool group).
   };
 
-  # sshd itself needs no separate composition here: `nixrescue.enable = true` above already turns
-  # on `services.openssh` (see ../../modules/nixrescue.nix) -- restating it would be exactly the
-  # kind of option-that-restates-the-name this project's whole house style forbids.
+  # sshd stays off in the cloneable example. A real headless device class may opt in, but the
+  # module then accepts only the per-device TPM-sealed host-key credential systemd-stub loaded
+  # from that machine's ESP; the shared image never carries or invents a private identity.
 
   # ── Firmware: curated, not the whole redistributable set ─────────────────────────────────────
   # See ../../lib/firmware.nix for the reviewable subtree list and the two traps its own header
@@ -110,7 +111,8 @@
   hardware.firmware = [ curatedFirmware ];
 
   # No bootloader here -- registering an ESP entry is a boot-arbitration module's domain, never
-  # this project's (see ../../modules/nixrescue.nix's own SCOPE comment). `./overlay-store.nix`
+  # this project's (see ../../modules/nixrescue.nix's own SCOPE comment). The exported
+  # `nixosModules.overlayStore`
   # already supplies this configuration's actual root filesystem.
   boot.loader.grub.enable = false;
 

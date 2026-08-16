@@ -19,10 +19,9 @@
     # record named as the critical-path dependency for that harness
     # (docs/design.md, experiments/README.md #001) -- it has since landed
     # upstream, which is what makes that test possible at all. Same
-    # boundary as nixfs above: a consumer of nixrescue.lib.mkMaintainer
-    # never needs this input, since materialising bytes onto a device and
-    # building/signing a UKI from them are deliberately two different
-    # projects' jobs (see lib/mkMaintainer.nix's own header).
+    # boundary as nixfs above: a consumer of the runtime module never needs
+    # this input. Building a release and reconciling it onto a host are
+    # deliberately exposed as plain library functions instead.
     nixboot.url = "github:julian-corbet/nixboot-corbet-ch";
     nixboot.inputs.nixpkgs.follows = "nixpkgs";
 
@@ -51,9 +50,8 @@
     # NOT an input: system-manager. Unlike nixfs/nixram, nixrescue's own
     # module never runs on a non-NixOS host at all -- the rescue is always
     # real NixOS, regardless of what the main in front of it is (see
-    # modules/nixrescue.nix's header). The one piece a system-manager main
-    # DOES call, `lib.mkMaintainer`, is a plain function with no module
-    # system involved and needs nothing from that flake either.
+    # modules/nixrescue.nix's header). Release reconciliation is a plain
+    # function with no module-system dependency either.
   };
 
   outputs = { self, nixpkgs, nixfs, nixboot, nixscroll }:
@@ -85,15 +83,16 @@
     {
       # The rescue's own option surface. Import this into a
       # `nixosConfigurations.<host>-rescue` -- NEVER into a main's own
-      # configuration, which only ever calls `lib.mkMaintainer` below. See
+      # configuration. See
       # modules/nixrescue.nix for the full SCOPE.
       nixosModules.nixrescue = ./modules/nixrescue.nix;
+      nixosModules.overlayStore = ./modules/overlay-store.nix;
       nixosModules.default = self.nixosModules.nixrescue;
 
-      # The mechanism a MAIN calls -- a plain function, not a module, so a
-      # NixOS main and a system-manager main call it identically. See
-      # lib/mkMaintainer.nix.
-      lib.mkMaintainer = import ./lib/mkMaintainer.nix;
+      # Plain release and reconciliation functions keep the content and
+      # host-actuation boundaries explicit and backend-neutral.
+      lib.mkRelease = import ./lib/mkRelease.nix;
+      lib.mkReconciler = import ./lib/mkReconciler.nix;
 
       # The firmware curation mechanism, exposed so a consumer can inspect or reuse the subtree
       # list without re-reading the file -- same reason nixfs exposes its own catalogue this way
@@ -111,9 +110,9 @@
         };
         modules = [
           self.nixosModules.nixrescue
+          self.nixosModules.overlayStore
           nixfs.nixosModules.default
           ./examples/rescue/configuration.nix
-          ./examples/rescue/overlay-store.nix
         ];
       };
 
@@ -127,12 +126,26 @@
           inherit lib nixpkgs system;
           nixrescueModule = self.nixosModules.nixrescue;
           nixfsModule = nixfs.nixosModules.default;
-          nixbootModule = nixboot.nixosModules.default;
-          mkMaintainer = self.lib.mkMaintainer;
+          mkUki = nixboot.lib.mkUki;
+          overlayStoreModule = self.nixosModules.overlayStore;
+          mkReconciler = self.lib.mkReconciler;
           # Only meaningful on rescueSystem -- see checks/default.nix's own handling of null.
-          rescueToplevel =
+          rescueRelease =
             if system == rescueSystem
-            then self.nixosConfigurations.rescue.config.system.build.toplevel
+            then
+              let
+                toplevel = self.nixosConfigurations.rescue.config.system.build.toplevel;
+              in
+              self.lib.mkRelease {
+                pkgs = pkgsFor system;
+                inherit toplevel;
+                mkUki = { kernelParamFile, ... }: nixboot.lib.mkUki {
+                  pkgs = pkgsFor system;
+                  name = "nixrescue-example";
+                  inherit toplevel;
+                  kernelParamFiles = [ kernelParamFile ];
+                };
+              }
             else null;
           slotSizeMiB = exampleSlotSizeMiB;
         });

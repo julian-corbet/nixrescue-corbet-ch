@@ -1,13 +1,13 @@
 # checks/eval-tests.nix
 #
-# EVAL-TIME tests for modules/nixrescue.nix and lib/mkMaintainer.nix. No VM,
-# no build beyond the cheap derivations these two produce: every module test
+# EVAL-TIME tests for modules/nixrescue.nix. No VM and no build beyond the
+# cheap derivations the module produces: every test
 # evaluates a full NixOS configuration (nixrescue needs the real option tree
 # -- services.openssh, users.*, environment.* -- not a bare `evalModules`
 # over its own options alone) and inspects what it RENDERS. See
 # rescue-vm-test.nix for the one test that boots anything.
 
-{ pkgs, nixpkgs, nixrescueModule, mkMaintainer }:
+{ pkgs, nixpkgs, nixrescueModule }:
 
 let
   lib = pkgs.lib;
@@ -53,6 +53,7 @@ let
       enable = true;
       builtAt = "2026-01-01T00:00:00Z";
       authorizedKeys = [ "ssh-ed25519 AAAAtest operator" ];
+      ssh.enable = true;
     };
   };
 
@@ -93,9 +94,25 @@ let
       (cfg-keys.users.users.root.openssh.authorizedKeys.keys == [ "ssh-ed25519 AAAAtest operator" ])
       "authorizedKeys should pass straight through to users.users.root.openssh.authorizedKeys.keys")
 
-    (check "sshd is enabled by default once nixrescue is enabled"
-      cfg-headless.services.openssh.enable
-      "services.openssh.enable should default true under nixrescue.enable")
+    (check "sshd is disabled by default in the cloneable rescue"
+      (!cfg-headless.services.openssh.enable)
+      "services.openssh.enable should stay false until a device class opts in")
+
+    (check "TPM-gated sshd has no generated host-key fallback"
+      (cfg-keys.services.openssh.hostKeys == [ ]
+        && lib.hasInfix "nixboot-initrd-hostkey" cfg-keys.services.openssh.extraConfig
+        && cfg-keys.systemd.services.sshd.serviceConfig.LoadCredentialEncrypted == [ "nixboot-initrd-hostkey" ])
+      "enabled rescue sshd must consume only the stub-delivered encrypted credential")
+
+    (check "enabling sshd without an operator key is refused"
+      (evalFailsBuild {
+        nixrescue = {
+          enable = true;
+          builtAt = "2026-01-01T00:00:00Z";
+          ssh.enable = true;
+        };
+      })
+      "a TPM host identity without an authorized operator would be an unreachable open service")
 
     (check "the UKI menu title is nixrescue"
       (cfg-headless.system.nixos.extraOSReleaseArgs.PRETTY_NAME == "nixrescue")
@@ -120,40 +137,7 @@ let
       "services.openssh.enable should not be forced on when nixrescue.enable is false")
   ];
 
-  # ── lib.mkMaintainer: a plain function, no module system, checked directly ──
-  maintainerResult = mkMaintainer {
-    inherit pkgs;
-    name = "eval-test-target";
-    toplevel = pkgs.writeText "fake-toplevel" "not a real closure, only used to check the function's own shape";
-    device = "/dev/disk/by-partlabel/rescue-eval-test";
-    onCalendar = "weekly";
-  };
-
-  maintainerResults = [
-    (check "mkMaintainer returns a plain attrset, not a module"
-      (!(maintainerResult ? _type) && !(maintainerResult ? options))
-      "the result should be an ordinary attrset with no module-system markers")
-
-    (check "mkMaintainer.service is ready to assign to systemd.services.<name> as-is"
-      (maintainerResult.service.serviceConfig.Type == "oneshot"
-        && lib.hasInfix "nixrescue-maintain-eval-test-target" maintainerResult.service.serviceConfig.ExecStart)
-      "service.serviceConfig should point ExecStart at the built script")
-
-    (check "mkMaintainer.timer honours the onCalendar argument"
-      (maintainerResult.timer.timerConfig.OnCalendar == "weekly")
-      "onCalendar should pass straight through to timer.timerConfig.OnCalendar")
-
-    (check "mkMaintainer.timer defaults OnCalendar to daily when unset"
-      ((mkMaintainer {
-        inherit pkgs;
-        name = "eval-test-default";
-        toplevel = pkgs.writeText "fake-toplevel-2" "unused";
-        device = "/dev/disk/by-partlabel/rescue-eval-test-2";
-      }).timer.timerConfig.OnCalendar == "daily")
-      "onCalendar's own default should be \"daily\"")
-  ];
-
-  allResults = results ++ maintainerResults;
+  allResults = results;
   failed = builtins.filter (r: !r.ok) allResults;
   report = lib.concatMapStringsSep "\n" (r: "  - ${r.name}: ${r.detail}") failed;
 in

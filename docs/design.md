@@ -1,6 +1,6 @@
 # Design notes
 
-The reasoning behind the two mechanisms this repo actually ships. Host-specific
+The reasoning behind the release mechanisms this repo actually ships. Host-specific
 facts (which machine, which measurement was taken where) live outside
 this repo on purpose — everything below is the mechanism, portable to any
 consumer.
@@ -15,17 +15,17 @@ system-manager, and Home Manager where the plane can participate, without
 inventing a Home Manager boot actuator.
 
 Within that model, nixrescue owns only recovery content and runtime. nixboot
-produces and verifies the UKI/ESP artifact around it. nixdeploy is the sole
-delivery specialist: scheduling, transport, materialization, slot rotation
-and selection, activation, rollback, reimage, and typed outcomes. The private
+produces and verifies the UKI/ESP artifact around it. nixdeploy is the
+delivery specialist: scheduling, authenticated transport, post-health reconciliation,
+activation, rollback, reimage, and typed outcomes. The private
 composition selects the class and role and supplies every real host, disk,
 identity, endpoint, key, and production-policy fact.
 
-The current implementation predates the complete split. `lib.mkMaintainer`
-still writes a squashfs to a raw slot, and the UEFI test still implements slot
-selection locally. Those are current facts and useful regression coverage,
-but the target is to move delivery orchestration to nixdeploy rather than
-expand it here.
+`lib.mkRelease` makes the signed-manifest unit; `lib.mkReconciler` owns the
+content-specific raw-slot and UKI pairing. nixdeploy passes the exact authenticated artifact to
+that command. A/B/C media provide interruption-safe rotation; an explicitly declared single-slot
+medium provides verified in-place repair without pretending it has rollback. The obsolete
+whole-device maintainer path is removed.
 
 ## Storage format: squashfs, not erofs, not f2fs
 
@@ -59,15 +59,14 @@ Raw partitions, one squashfs `dd`'d onto each — no containing filesystem.
 Nothing to fsck, nothing to corrupt in the ordinary sense: a slot is a valid
 squashfs superblock or it is not, and `mount -t squashfs` reads it straight
 off the block device. Equal slot size across every target medium is what
-lets one image be one artifact with one size budget; per-host content
+lets one image be one artifact with one size budget; per-device identity
 belongs in the vault, not in the rescue image itself.
 
-Slot count, unlike slot size, is free to differ per medium, and what it
-varies is rollback depth: several slots keep older builds bootable while a
-new one lands, a single slot keeps none. That makes the count an operational
-decision rather than a content detail. Under the target architecture,
-nixdeploy owns that decision and the rollout/rollback behavior around it;
-nixrescue only supplies the squashfs content to deliver.
+The slot count is a device-class fact. On a three-slot medium, current and previous remain
+protected while a new release lands in the third. On an explicit one-slot medium, the reconciler
+first completes and verifies the replacement UKI, then rewrites and reads back the sole squashfs,
+and publishes the matching UKI last. It records no fictional previous generation: power loss
+during that raw write requires repair from the next successful main boot.
 
 Slots are found by partition name, which makes the naming rule part of this
 contract rather than a habit of whichever tool carved the medium. A
@@ -80,20 +79,22 @@ to match both shapes. A medium named any other way fails silently rather
 than loudly — a glob matching nothing expands to itself, every existence
 test on it then fails, and the image boots to no store at all.
 
-Today slot selection resolves from a small pointer file on the boot
-partition, falling back to probing slots in order if it is missing or the
-named slot fails its own superblock check. That current mechanism is covered
-by the UEFI test. Its target owner is nixdeploy, together with materializing,
-rotating, activating, and rolling back the selected slot.
+The UKI embeds the squashfs SHA-256 digest and byte length as well as the exact
+`init=/nix/store/.../init`. The initrd hashes a candidate's signed byte range before mounting it,
+then checks the pathname and `nix-path-registration`. A store pathname is not an integrity proof:
+an attacker can manufacture it inside another squashfs. The ESP pointer is only a performance hint
+among digest-compatible slots.
 
 ## Boot flow
 
 ```
-boot → nixboot-verified artifact hands off
-     → recovery content selected during deployment starts
+boot → firmware verifies the host-signed UKI
+     → signed image digest authenticates a raw slot before the initrd mounts it
+     → embedded init path confirms the release is internally coherent
      → rescue OS up from a plaintext slot        (zero crypto in the content path)
-     → ephemeral SSH host key + operator PUBLIC keys baked into the image
-     → reachable on the network immediately        (a new host key is expected, not a warning sign)
+     → operator PUBLIC keys come from the shared image
+     → device TPM unseals only its SSH host identity
+        (missing credential or PCR mismatch: sshd stays down, console stays usable)
      → a vault's passphrase, if one is configured, at the console or over SSH
         (systemd-ask-password, the same pattern a boot-arbitration module's
          own initrd remote-unlock already uses elsewhere in this family)
@@ -101,11 +102,10 @@ boot → nixboot-verified artifact hands off
      → passphrase times out → still a fully usable, local-only rescue
 ```
 
-Public keys live in the image because they are not secret; private identity
-lives in a vault this project does not pack, only knows how to try. A
-headless box that falls into rescue is therefore not reachable with its full
-identity until a human answers the prompt — accepted deliberately, and
-stated plainly rather than assumed away.
+Public keys live in the image because they are not secret. The TPM credential gates only SSH
+identity and never decrypts a vault or disk. Every useful data container still requires the
+operator's passphrase. Its runtime producer is shared across planes through
+`nixboot.lib.mkTpmSshCredential`; no rescue derivation generates or contains a device identity.
 
 ## Firmware: curated, not the whole redistributable set
 
@@ -141,20 +141,17 @@ Three traps, each verified against a real build, not assumed:
 
 ## Size is a build-time gate, not a `dd`-time surprise
 
-`lib.mkMaintainer`'s current runtime check (`../lib/mkMaintainer.nix`) refuses to write an
-oversized image to its device — but only on a real host, against a real device that already
-exists. `checks/rescue-image-fits-slot.nix` moves the same check to build time: it builds the real
+`checks/rescue-image-fits-slot.nix` builds the real
 squashfs from the generic example closure, using the module's exact `mksquashfs` invocation, and
 fails the *derivation* the moment that image would not fit its declared slot. An image that grows
 too fat to ship becomes a build failure here, long before anyone reaches for a `dd`.
 
-The fit predicate remains a valid content/artifact check after the delivery
-move. The runtime write, schedule, target selection, and outcome reporting
-move to nixdeploy.
+`mkReconciler` repeats the capacity check against the selected live slot before writing and then
+hashes the bytes back from the device.
 
 ## Headless and graphical, from one closure
 
-Every consumer boots to `multi-user.target` with sshd up; a graphical
+Every consumer boots to `multi-user.target`; sshd comes up only with a valid device credential. A graphical
 session is raised on demand at the console, never automatically. This
 project's own module never names a compositor — `nixrescue.gui.package` is a
 bare package pointer, resolved with `lib.getExe`, and `null` means

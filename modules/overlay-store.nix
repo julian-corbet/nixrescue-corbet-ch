@@ -1,4 +1,4 @@
-# examples/rescue/overlay-store.nix
+# modules/overlay-store.nix
 #
 # The squashfs+tmpfs overlay store arrangement this design record's own boot-flow describes: a
 # read-only squashfs slot as the lower store, a tmpfs upper store, merged into the ordinary
@@ -12,14 +12,15 @@
 # raw partition, not a file inside an iso9660 filesystem).
 #
 # GENERALISED HERE from that test's single hand-built two-slot disk to any medium carrying one or
-# more partitions labelled `nixrescue` (one) or `nixrescue-a`/`-b`/`-c` (several), plus an ESP labelled `NIXRESCUE` carrying an optional
-# `/EFI/nixrescue/current` pointer file. "Boot the previous build" is then editing that one file,
-# not re-flashing anything -- exactly the slot-selection contract this project's own design record
-# states (see docs/design.md, "Medium layout").
+# more declared raw rescue partitions, plus an ESP carrying an optional
+# `/EFI/nixrescue/current` preference file. The preference is never an authority: a UKI embeds
+# `init=/nix/store/<exact-toplevel>/init` plus the squashfs byte length and SHA-256 digest. This
+# resolver hashes the raw bytes before mounting them and accepts only an exact match. The pathname
+# remains a coherence check after authentication; it is not mistaken for a cryptographic proof.
 #
 # WHAT THIS DOES NOT DECIDE: how many slots exist on any given medium, which bootloader placed a UKI
 # in front of this, or how bytes got onto the medium in the first place. Those are a boot-arbitration
-# module's domain and `lib.mkMaintainer`'s, respectively -- see `../../modules/nixrescue.nix`'s own
+# module's domain and `lib.mkReconciler`'s, respectively -- see `../../modules/nixrescue.nix`'s own
 # SCOPE comment. This file wires the one thing every consumer needs regardless of slot count:
 # resolve which slot to mount, mount it read-only, and overlay a writable tmpfs on top before
 # anything else in the boot depends on `/nix/store` existing.
@@ -45,16 +46,14 @@
 #     that this file states explicitly, rather than something that happened to fall out of
 #     whatever order a classic stage-1 script mounted `fileSystems` entries in.
 #
-# NOT covered by a dedicated test in this repo: this generalised (by-label/by-partlabel) form is a
-# straightforward reshaping of the exact mechanism `rescue-uefi-boot-vm-test.nix` already exercises
-# against a hand-built two-slot disk -- growing that harness to also drive THIS file's own
-# by-partlabel probing loop, rather than the hand-rolled `/dev/vda2`/`/dev/vda3` device names it
-# uses today, is the natural next increment (see this project's own testing philosophy, docs/design.md,
-# on why the harness is built to grow rather than arrive complete).
+# The UEFI VM check imports this module directly. It proves both preference and fallback using
+# GPT PARTLABELs, and proves that a structurally-valid squashfs containing the wrong toplevel is
+# rejected rather than selected.
 #
 { config, lib, pkgs, utils, ... }:
 
 let
+  cfg = config.nixrescue.store;
   roStoreMount = "/sysroot/nix/.ro-store";
   rwStoreMount = "/sysroot/nix/.rw-store";
   nixStoreMount = "/sysroot/nix/store";
@@ -68,11 +67,61 @@ let
   nixStoreUnit = "${utils.escapeSystemdPath nixStoreMount}.mount";
 in
 {
+  options.nixrescue.store = {
+    slotDevices = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [
+        "/dev/disk/by-partlabel/nixrescue"
+        "/dev/disk/by-partlabel/nixrescue-a"
+        "/dev/disk/by-partlabel/nixrescue-b"
+        "/dev/disk/by-partlabel/nixrescue-c"
+      ];
+      description = ''
+        Ordered raw squashfs devices this rescue UKI may use as its lower Nix store. Missing
+        devices are skipped. A device is usable only when its raw bytes match the size and SHA-256
+        digest authenticated by this UKI and it contains the exact embedded init= store path plus
+        a nix-path-registration database.
+      '';
+    };
+
+    espDevice = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = "/dev/disk/by-partlabel/ESP";
+      description = ''
+        Optional ESP device carrying EFI/nixrescue/current. The file is only a preference among
+        content-compatible slots; it can never select a slot for a different UKI generation.
+        null disables the preference file completely.
+      '';
+    };
+
+    pointerFile = lib.mkOption {
+      type = lib.types.str;
+      default = "/EFI/nixrescue/current";
+      description = "Absolute path, within espDevice, of the optional preferred PARTLABEL.";
+    };
+
+    deviceWaitSeconds = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = 30;
+      description = ''
+        Maximum initrd time to wait for at least one declared slot device before probing. This
+        covers kernel/udev discovery without turning a genuinely absent rescue medium into an
+        unbounded boot hang.
+      '';
+    };
+  };
+
+  config = {
+
   fileSystems."/" = {
     fsType = "tmpfs";
     device = "none";
     options = [ "mode=0755" ];
   };
+
+  # Stage 2 otherwise bind-remounts /nix/store read-only even when stage 1 handed it a writable
+  # overlay. Rescue needs the tmpfs upper layer for repairs and temporary substitutions.
+  boot.nixStoreMountOpts = [ ];
 
   # This option's own upstream default, at the revision this repo pins -- stated explicitly
   # because every service and mount below depends on it, not to restate a default for its own
@@ -85,9 +134,9 @@ in
     "nls_cp437"
     "nls_iso8859_1"
   ];
-  # "overlay" force-loaded (no "loop" -- a slot is a raw partition, never a file, see this file's
-  # own header).
-  boot.initrd.kernelModules = [ "overlay" ];
+  # These are used by the resolver itself, so "available" is insufficient: load them before its
+  # mount probes. No "loop" -- a slot is a raw partition, never a file (see this file's header).
+  boot.initrd.kernelModules = [ "overlay" "squashfs" "vfat" ];
 
   # ── slot resolution: postDeviceCommands' systemd-stage-1 replacement ────────────────────────
   #
@@ -104,14 +153,16 @@ in
     description = "nixrescue: resolve which cold-mode slot to boot from";
     unitConfig.DefaultDependencies = false;
     requiredBy = [ roStoreUnit ];
+    after = [ "systemd-modules-load.service" ];
     before = [ roStoreUnit "shutdown.target" ];
     conflicts = [ "shutdown.target" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
     };
-    # coreutils (mkdir/cat/tr/ln/echo) and mount/umount are already on the systemd-stage-1 PATH by
-    # default (`initrd.nix`'s own `initrdBin`/`extraBin`) -- nothing extra needed on `path` here.
+    # `sleep` is load-bearing for the bounded kernel-device discovery wait and is not guaranteed
+    # by the minimal initrd PATH, so make the coreutils dependency explicit.
+    path = [ pkgs.coreutils pkgs.util-linux ];
     # `blkid` is deliberately NOT used to find the ESP: `/dev/disk/by-label/NIXRESCUE` is the same
     # udev-populated symlink a `blkid` query would have had to resolve anyway -- exactly how the
     # slot partitions below are already found, via by-partlabel, with no extra binary either. One
@@ -121,58 +172,135 @@ in
       echo "nixrescue: resolving which cold-mode slot to boot from"
       mkdir -p /mnt-esp /mnt-slot-probe
 
+      # This unit is intentionally not Requires=-bound to every possible slot: missing slots are
+      # legal, and one generic image lists singular plus A/B/C shapes. Kernel discovery can still
+      # finish after the initrd service graph starts, so wait boundedly for ANY candidate instead
+      # of making one instantaneous, permanently wrong absence decision.
+      remaining=${toString cfg.deviceWaitSeconds}
+      while [ "$remaining" -gt 0 ]; do
+        slot_seen=""
+        for candidate in ${lib.concatMapStringsSep " " lib.escapeShellArg cfg.slotDevices}; do
+          if [ -e "$candidate" ]; then
+            slot_seen=1
+            break
+          fi
+        done
+        [ -n "$slot_seen" ] && break
+        sleep 1
+        remaining=$((remaining - 1))
+      done
+
+      init_path=""
+      image_sha256=""
+      image_size=""
+      for argument in $(cat /proc/cmdline); do
+        case "$argument" in
+          init=*) init_path="''${argument#init=}" ;;
+          nixrescue.imageSha256=*) image_sha256="''${argument#nixrescue.imageSha256=}" ;;
+          nixrescue.imageSize=*) image_size="''${argument#nixrescue.imageSize=}" ;;
+        esac
+      done
+      case "$init_path" in
+        /nix/store/*/init) ;;
+        *)
+          echo "nixrescue: FATAL: UKI command line has no safe /nix/store/.../init path" >&2
+          exit 1
+          ;;
+      esac
+      case "$init_path" in
+        *".."*)
+          echo "nixrescue: FATAL: refusing unsafe init path: $init_path" >&2
+          exit 1
+          ;;
+      esac
+      relative_init="''${init_path#/nix/store/}"
+      case "$image_sha256" in
+        *[!0-9a-f]*|"")
+          echo "nixrescue: FATAL: UKI command line has no safe lowercase SHA-256 image digest" >&2
+          exit 1
+          ;;
+      esac
+      [ "''${#image_sha256}" -eq 64 ] || {
+        echo "nixrescue: FATAL: UKI image digest is not 64 hexadecimal characters" >&2
+        exit 1
+      }
+      case "$image_size" in
+        *[!0-9]*|""|0)
+          echo "nixrescue: FATAL: UKI command line has no safe positive image size" >&2
+          exit 1
+          ;;
+      esac
+
       pointer=""
-      if [ -e /dev/disk/by-label/NIXRESCUE ] && mount -t vfat -o ro /dev/disk/by-label/NIXRESCUE /mnt-esp 2>/dev/null; then
-        if [ -r /mnt-esp/EFI/nixrescue/current ]; then
-          pointer=$(cat /mnt-esp/EFI/nixrescue/current 2>/dev/null | tr -d ' \t\r\n') || true
+      ${lib.optionalString (cfg.espDevice != null) ''
+      if [ -e ${lib.escapeShellArg cfg.espDevice} ] && mount -t vfat -o ro ${lib.escapeShellArg cfg.espDevice} /mnt-esp 2>/dev/null; then
+        if [ -r /mnt-esp${lib.escapeShellArg cfg.pointerFile} ]; then
+          pointer=$(cat /mnt-esp${lib.escapeShellArg cfg.pointerFile} 2>/dev/null | tr -d ' \t\r\n') || true
         fi
         umount /mnt-esp 2>/dev/null || true
       else
-        echo "nixrescue: no NIXRESCUE-labelled ESP found (or it would not mount) -- probing slots in order" >&2
+        echo "nixrescue: no declared ESP found (or it would not mount) -- probing slots in order" >&2
       fi
+      ''}
 
-      # "a slot is a valid superblock or it is not" -- the check IS the mount attempt, not a
-      # magic-number parse.
+      # Never ask the kernel's squashfs parser to touch unauthenticated rescue bytes. An attacker
+      # can manufacture the signed UKI's expected store pathname inside an arbitrary filesystem;
+      # only the digest embedded in that signed UKI authenticates the external image.
       trySlot() {
-        mount -t squashfs -o ro "$1" /mnt-slot-probe 2>/dev/null || return 1
+        [ -b "$1" ] || return 1
+        device_size=$(blockdev --getsize64 "$1") || return 1
+        [ "$image_size" -le "$device_size" ] || return 1
+        actual_sha256=$(head -c "$image_size" "$1" | sha256sum | cut -d' ' -f1) || return 1
+        if [ "$actual_sha256" != "$image_sha256" ]; then
+          echo "nixrescue: rejecting $1: raw image digest does not match the signed UKI" >&2
+          return 1
+        fi
+        mount -t squashfs -o ro "$1" /mnt-slot-probe || return 1
+        if [ ! -e "/mnt-slot-probe/$relative_init" ] || [ ! -r /mnt-slot-probe/nix-path-registration ]; then
+          umount /mnt-slot-probe 2>/dev/null || true
+          return 1
+        fi
         umount /mnt-slot-probe 2>/dev/null || true
         return 0
       }
 
       chosen=""
       if [ -n "$pointer" ]; then
-        candidate="/dev/disk/by-partlabel/$pointer"
-        if [ -e "$candidate" ] && trySlot "$candidate"; then
-          chosen="$candidate"
-          echo "nixrescue: pointer names '$pointer' -- honoured"
-        else
-          echo "nixrescue: pointer names '$pointer' but its superblock check failed (or it does not exist) -- falling back to probing"
-        fi
+        case "$pointer" in
+          *[!A-Za-z0-9._-]*|"")
+            echo "nixrescue: ignoring invalid preferred PARTLABEL '$pointer'" >&2
+            ;;
+          *)
+            candidate="/dev/disk/by-partlabel/$pointer"
+            if [ -e "$candidate" ] && trySlot "$candidate"; then
+              chosen="$candidate"
+              echo "nixrescue: preference names compatible slot '$pointer' -- honoured"
+            else
+              echo "nixrescue: preference '$pointer' is absent or incompatible with $init_path -- probing" >&2
+            fi
+            ;;
+        esac
       fi
 
       if [ -z "$chosen" ]; then
-        # `nixrescue*` matches BOTH shapes of the partition naming rule: a medium
-        # with ONE slot names it `nixrescue`, a medium with several names them
-        # `nixrescue-a`/`-b`/`-c` -- the bare module name when it is alone,
-        # lettered when there are more than one.
-        # The older `nixrescue-slot-*` glob matched neither the bare singular nor
-        # anything actually deployed -- a stick carved as `nixrescue-a` would boot
-        # this image and find no store at all, silently, because a glob that
-        # matches nothing expands to itself and every `[ -e ]` then fails.
-        for candidate in /dev/disk/by-partlabel/nixrescue*; do
+        for candidate in ${lib.concatMapStringsSep " " lib.escapeShellArg cfg.slotDevices}; do
           [ -e "$candidate" ] || continue
           if trySlot "$candidate"; then
             chosen="$candidate"
-            echo "nixrescue: probing found a usable slot at $candidate"
+            echo "nixrescue: probing found a slot compatible with $init_path at $candidate"
             break
           fi
         done
       fi
 
       if [ -z "$chosen" ]; then
-        echo "nixrescue: FATAL: no usable rescue slot found on any device" >&2
+        echo "nixrescue: FATAL: no slot matches the UKI's signed image digest and init path $init_path" >&2
+        exit 1
       else
-        ln -sf "$chosen" /dev/nixrescue-active-slot
+        # Keep the selector outside /dev. systemd treats any mount What= below /dev as a device
+        # unit and waits for a udev event; a resolver-created symlink has no such event and would
+        # deadlock for the default device timeout even though its target already exists.
+        ln -sf "$chosen" /run/nixrescue-active-slot
         echo "nixrescue: active slot -> $chosen"
       fi
     '';
@@ -190,7 +318,7 @@ in
       # Populated by nixrescue-resolve-slot above, before this unit ever runs -- the same
       # stable-symlink-populated-by-initrd pattern LUKS/LVM device-mapper nodes already rely on.
       where = roStoreMount;
-      what = "/dev/nixrescue-active-slot";
+      what = "/run/nixrescue-active-slot";
       type = "squashfs";
       options = "ro";
     }
@@ -266,5 +394,17 @@ in
     script = ''
       ${lib.getExe' config.nix.package.out "nix-store"} --load-db < /nix/store/nix-path-registration
     '';
+  };
+
+  assertions = [
+    {
+      assertion = cfg.slotDevices != [ ];
+      message = "nixrescue.store.slotDevices must name at least one raw rescue slot.";
+    }
+    {
+      assertion = lib.hasPrefix "/" cfg.pointerFile && !(lib.hasInfix ".." cfg.pointerFile);
+      message = "nixrescue.store.pointerFile must be an absolute path without '..'.";
+    }
+  ];
   };
 }

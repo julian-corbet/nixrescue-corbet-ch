@@ -10,7 +10,7 @@ nixrescue produces recovery content and runtime behavior. It does not own
 the surrounding UKI, ESP entry, signing, firmware registration, transport,
 activation, or rollback. Those boundaries are explicit below.
 
-## The two things this repo actually is
+## The runtime and release contract
 
 **A tiny NixOS module** (`nixosModules.default`), imported into the rescue's
 OWN `nixosConfigurations.<host>-rescue` — never into a main's configuration.
@@ -22,12 +22,12 @@ operator's public keys, which device (if any) holds this host's vault and
 how long to wait for it, and a staleness stamp a human can actually read.
 See `modules/nixrescue.nix` for the full option surface and its SCOPE block.
 
-**A plain function** (`lib.mkMaintainer`), currently called by a MAIN — NixOS or not.
-"Build a squashfs of a toplevel's closure, fit-check it, `dd` it onto a raw
-device, skip the whole thing if nothing changed" needs nothing NixOS-specific,
-so a NixOS main and a system-manager main call this identically. See
-`lib/mkMaintainer.nix`. This is current implemented behavior, not the target
-ownership boundary: materialization and scheduling move to nixdeploy.
+**Two plain release functions.** `lib.mkRelease` builds one squashfs, hashes it, asks nixboot to
+embed its digest and byte length in the unsigned UKI, and binds those artifacts below one immutable
+store path. `lib.mkReconciler` accepts only that exact signed-manifest artifact, verifies the UKI
+and raw bytes, and publishes `current` last. Its explicit modes are atomic A/B/C rotation or a
+single verified in-place slot with no on-medium rollback.
+Both are backend-neutral; there is no legacy whole-device maintainer path.
 
 ## Target architecture and ownership boundary
 
@@ -42,20 +42,18 @@ The three specialists meet without overlapping:
 - **nixrescue** produces the recovery NixOS content and its runtime contract;
 - **nixboot** produces and verifies the boot artifact that points at that
   content, including UKI construction and signing;
-- **nixdeploy** alone delivers it across NixOS, system-manager, and Home
-  Manager where meaningful: scheduling, transport, materialization, slot
-  rotation and selection, activation, rollback, reimage, and typed outcomes.
+- **nixdeploy** authenticates and transports the exact release, then invokes its reconciler after
+  a healthy activation and on AlreadyCurrent. Only system planes may receive boot authority.
 
 The private composition chooses the device class and boot role and supplies
 all real host, disk, identity, endpoint, key, and production-policy facts.
 This public repo contains only the reusable mechanism, examples, and tests.
 
-This target is not fully implemented today. `nixosModules.default` already
-produces the rescue runtime. nixboot's `extraEntries.*` already builds the
-boot artifact used by the UEFI integration test. However,
-`lib.mkMaintainer`, its example timers, and slot-selection logic still live
-here; they are migration debt to nixdeploy, not a second delivery contract to
-extend.
+The shared image contains no host private identity. A receiving device may contribute one
+TPM/PCR-bound SSH host-key credential through systemd-stub; failed unseal leaves sshd down and the
+console working. NixOS initrd-SSH hosts maintain it through nixboot; other Linux/system-manager
+hosts use `nixboot.lib.mkTpmSshCredential`. TPM is never an unlock path for a vault or another data
+container.
 
 ## Quickstart
 
@@ -68,51 +66,73 @@ extend.
 On the rescue's own configuration:
 
 ```nix
-# nixosConfigurations."myhost-rescue" — a real, separate NixOS system
+# one generic nixosSystem shared by every compatible machine
 {
-  imports = [ inputs.nixrescue.nixosModules.default ];
+  imports = [ inputs.nixrescue.nixosModules.default inputs.nixrescue.nixosModules.overlayStore ];
   nixrescue = {
     enable = true;
     builtAt = "2026-07-28T00:00:00Z"; # stamped by whatever builds this image
     authorizedKeys = [ "ssh-ed25519 AAAA... operator" ];
+    ssh.enable = true; # TPM credential required by default; no fallback identity
     gui.package = null; # or a package whose one entrypoint raises a session
     vault.device = "/dev/disk/by-partlabel/vault"; # or leave null: no vault
   };
 }
 ```
 
-Current API, on the main that materializes the rescue onto its cold medium:
+On a main that consumes the immutable release:
 
 ```nix
 let
-  maintainer = inputs.nixrescue.lib.mkMaintainer {
+  release = inputs.nixrescue.lib.mkRelease {
+    inherit pkgs toplevel;
+    mkUki = { kernelParamFile, ... }: inputs.nixboot.lib.mkUki {
+      inherit pkgs toplevel;
+      name = "nixrescue";
+      kernelParamFiles = [ kernelParamFile ];
+    };
+  };
+  reconciler = inputs.nixrescue.lib.mkReconciler {
     inherit pkgs;
-    name = "slot-a";
-    toplevel = self.nixosConfigurations."myhost-rescue".config.system.build.toplevel;
-    device = "/dev/disk/by-partlabel/nixrescue-a";
+    name = "machine-class";
+    release = release.bundle;
+    slots = map (n: "/dev/disk/by-partlabel/nixrescue-${n}") [ "a" "b" "c" ];
+    signing = {
+      enable = true;
+      dbKey = "/run/secure-boot/keys/db/db.key";
+      dbCert = "/run/secure-boot/keys/db/db.pem";
+    };
   };
 in {
-  systemd.services.nixrescue-maintain-slot-a = maintainer.service;
-  systemd.timers.nixrescue-maintain-slot-a = maintainer.timer;
+  nixdeploy.receiver.bootRoleReconcile = {
+    command = "${reconciler}/bin/nixrescue-reconcile-machine-class";
+    role = "nixrescue";
+  };
 }
 ```
 
-That assignment is identical whether this config is a real NixOS
-`configuration.nix` or a system-manager config — both understand
-`systemd.services.<name>` / `systemd.timers.<name>` as plain attribute sets,
-which is why the current helper is a function rather than a module. New
-delivery design belongs in nixdeploy; do not grow this helper into another
-scheduler or rollout engine.
+The signed manifest must name `release.bundle` exactly. The reconciler rejects any other argument;
+it is safe to run after every successful boot as well as through nixdeploy.
+
+For a device with exactly one rescue partition, declare the geometry rather than inventing slots:
+
+```nix
+slots = [ "/dev/disk/by-partlabel/nixrescue" ];
+updateMode = "in-place";
+historyKeep = 1;
+```
+
+That mode signs and verifies the replacement UKI before touching the raw slot, validates the
+written image against the digest authenticated by the UKI, and publishes the matching UKI last. It
+cannot preserve the old squashfs across a power loss during the one physical write; A/B/C media
+remain the mode for on-medium rollback.
 
 ## What is deliberately not here
 
-No `nixrescue.kernel.*` — every rescue reuses its own host's stock
-`boot.kernelPackages`, pinned simply by whichever toplevel `mkMaintainer` was
-pointed at. No ESP filename, signing, or NVRAM entry — nixboot produces and
-verifies that artifact. No transport, scheduling, materialization policy,
-slot rotation/selection, activation, rollback, reimage, or outcome model —
-nixdeploy owns delivery. This project's current `mkMaintainer` and slot logic
-predate that boundary and are to be migrated, not copied.
+No `nixrescue.kernel.*` — the shared configuration chooses one broad kernel/module set. No NVRAM
+write or Secure Boot enrollment — firmware ownership is a supervised ceremony. No transport,
+activation, reimage, or outcome model — nixdeploy owns those. The content-specific raw-slot and
+UKI-pair validation remains here in `mkReconciler`.
 No `apps.*`, no `desktop.enable` — a consumer wanting a tool in its rescue
 reaches for ordinary `environment.systemPackages` in its own configuration.
 No opinion on what a vault contains or how it's packed — this project only
@@ -152,16 +172,16 @@ short version.
 
 `checks/rescue-vm-test.nix` boots a real, disposable QEMU VM
 (`pkgs.testers.nixosTest` — nothing persists after the build, no standing VM
-infrastructure) and asserts the boot contract end to end: `multi-user.target`
-reached, sshd up with the operator key installed, the repair toolchain
+infrastructure) and asserts the runtime contract: `multi-user.target`
+reached, the repair toolchain
 present with a tool actually run, the GUI pointer actually launching its
 target, a synthetic broken disk (LUKS + btrfs, built inside the VM) found,
-unlocked and mounted with a file read back off it, and `lib.mkMaintainer`
-itself building a real squashfs and writing it to a raw device. `nix flake
-check` runs it, alongside the module's own rendering-only `checks/eval-tests.nix`.
+unlocked and mounted with a file read back off it. The reconciler VM separately exercises both a
+real GPT A/B/C medium and an independent one-slot medium, including signature verification,
+read-back hashing, publication order, history rotation where possible, and repeat idempotence.
+`nix flake check` runs it alongside the module's own rendering-only `checks/eval-tests.nix`.
 
-`checks/rescue-uefi-boot-vm-test.nix` separately exercises an OVMF UEFI path
-through a UKI built by nixboot's `extraEntries.*`, including the currently
-local slot-selection behavior. It proves the software boundary; it does not
-prove physical firmware binding to a real GPU or radio. The slot-delivery
-portion belongs in nixdeploy under the target architecture above.
+`checks/rescue-uefi-boot-vm-test.nix` separately exercises an OVMF UEFI path through a UKI built by
+nixboot. It proves the production resolver rejects a valid squashfs with the expected pathname but
+the wrong signed digest. It proves the software boundary; it does not prove physical firmware
+binding to a real GPU or radio.

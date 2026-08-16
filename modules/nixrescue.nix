@@ -3,8 +3,8 @@
 # The rescue layer's own runtime contract. This module is imported into a
 # rescue's OWN `nixosConfigurations.<host>-rescue` -- a real NixOS
 # configuration regardless of what the main in front of it is -- and is
-# NEVER imported by a main. A main's only contact with this project is
-# `lib.mkMaintainer`, a plain function (see ../lib/mkMaintainer.nix), which
+# NEVER imported by a main. A main's only contact with this project is through
+# `lib.mkRelease`/`lib.mkReconciler`, plain functions, which
 # is why this file has no system-manager twin: unlike nixfs/nixram, nothing
 # here ever needs to render on a non-NixOS host, because the rescue itself
 # is always real NixOS by design.
@@ -20,8 +20,9 @@
 #   OWNED : the second-system contract's runtime surface as it exists ON the
 #           rescue OS itself -- which package, if any, raises a graphical
 #           session at the console on demand (gui.package); the operator
-#           PUBLIC keys baked into the image so it is reachable over SSH
-#           before any private identity unlocks (authorizedKeys); which
+#           PUBLIC keys baked into the image (authorizedKeys), and whether
+#           sshd consumes a per-device TPM-sealed host identity supplied by
+#           systemd-stub (ssh.*); which
 #           device this rescue attempts to open as its vault and how long it
 #           waits for a passphrase before falling back to a local-only boot
 #           (vault.*); and a staleness stamp a human can read at the console,
@@ -31,8 +32,8 @@
 #           `boot.kernelPackages` line, whatever the consumer's own
 #           `nixosConfigurations.<host>-rescue` already says. There is no
 #           `nixrescue.kernel.*` to duplicate that choice -- the kernel is
-#           pinned at materialisation time simply by which toplevel
-#           `lib.mkMaintainer` was pointed at, not by an option here.
+#           pinned at release-build time simply by which toplevel
+#           `lib.mkRelease` was pointed at, not by an option here.
 #   NOT   : the ESP entry's filename, signing, or NVRAM registration --
 #           nixboot's domain (`nixboot.extraEntries`, once it exists).
 #           nixrescue declares repair tooling and a boot target; it never
@@ -44,9 +45,9 @@
 #           for the same NixOS option would be exactly the kind of
 #           option-that-restates-the-name this project's whole house style
 #           forbids.
-#   NOT   : materialisation onto the cold medium, or any timer that runs on
-#           the MAIN -- that is `lib.mkMaintainer`, a plain function a main
-#           calls directly, never a module a main imports. Keeping the two
+#   NOT   : scheduling or transport. `lib.mkReconciler` is a plain function a main
+#           calls directly (or nixdeploy invokes with an exact signed artifact), never a module
+#           a main imports. Keeping the two
 #           apart is what lets a NixOS main and a system-manager main call
 #           the identical function.
 #   NOT   : what goes into the vault, or how it is packed -- nixvault's job.
@@ -88,11 +89,42 @@ in
       description = ''
         Operator PUBLIC keys, baked into the image at build time. These are not
         secret -- unlike everything a vault carries -- so shipping them in the
-        image rather than waiting on a vault to unlock is what makes the rescue
-        reachable over SSH the moment it is up, using its own ephemeral per-boot
-        host key. Empty means console-only until a vault (if one is configured
-        at all) opens and brings up whatever private identity that carries.
+        image rather than waiting on a vault to unlock is safe because they are
+        not identity secrets. Empty means console-only. The server identity is
+        deliberately not in this list or image; see ssh.tpm2Credential.
       '';
+    };
+
+    ssh = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Enable rescue sshd. Off by default: the universal image always retains a local console,
+          while a device class that permits remote rescue opts in explicitly and supplies
+          authorizedKeys. With tpm2Credential left at its secure default, sshd starts only when
+          systemd-stub delivered the device's TPM-sealed host key from the ESP.
+        '';
+      };
+
+      tpm2Credential = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Require the per-device nixboot-initrd-hostkey encrypted credential as sshd's only host
+          key. A missing credential or TPM/PCR mismatch leaves sshd down and the console usable;
+          no ephemeral or plaintext fallback is generated. Disable only in an isolated test.
+        '';
+      };
+
+      credentialName = lib.mkOption {
+        type = lib.types.strMatching "[A-Za-z0-9_.-]+";
+        default = "nixboot-initrd-hostkey";
+        description = ''
+          Name shared with the systemd-stub global credential on the ESP and the host's nixboot
+          seal service. This is a stable protocol name, not a host-specific value.
+        '';
+      };
     };
 
     vault = {
@@ -159,8 +191,19 @@ in
     system.nixos.extraOSReleaseArgs.PRETTY_NAME = "nixrescue";
 
     services.openssh = {
-      enable = lib.mkDefault true;
+      enable = cfg.ssh.enable;
       settings.PermitRootLogin = lib.mkDefault "prohibit-password";
+      hostKeys = lib.mkIf cfg.ssh.tpm2Credential [ ];
+      extraConfig = lib.optionalString cfg.ssh.tpm2Credential ''
+        HostKey /run/credentials/sshd.service/${cfg.ssh.credentialName}
+      '';
+    };
+
+    systemd.services.sshd.serviceConfig = lib.mkIf (cfg.ssh.enable && cfg.ssh.tpm2Credential) {
+      LoadCredentialEncrypted = [ cfg.ssh.credentialName ];
+      # nixpkgs defaults sshd to Restart=always. That would turn a missing/unsealable TPM
+      # credential into a permanent restart loop; strict gating means one hard failure instead.
+      Restart = lib.mkForce "no";
     };
 
     users.users.root.openssh.authorizedKeys.keys = cfg.authorizedKeys;
@@ -208,6 +251,10 @@ in
     '';
 
     assertions = [
+      {
+        assertion = !cfg.ssh.enable || cfg.authorizedKeys != [ ];
+        message = "nixrescue.ssh.enable requires at least one operator public key in nixrescue.authorizedKeys.";
+      }
       {
         assertion = cfg.vault.device == null || lib.hasPrefix "/dev/" cfg.vault.device;
         message = ''

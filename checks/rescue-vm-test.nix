@@ -16,15 +16,12 @@
 # `checks/swappiness-relief-vm-test.nix` already proved out in this house,
 # not invention (see that file's own header for the model this one copies).
 #
-# NOT tested here, and deliberately so: a real UEFI boot path (nixpkgs'
-# qemu-vm.nix supports `useEFIBoot`/`useBootLoader`, which would exercise a
-# signed UKI, an ESP, and slot selection -- but that is `nixboot`'s domain,
-# not yet built, and this harness does not need to wait for it). Also not
-# tested: firmware binding (a real GPU / a real WiFi radio) -- QEMU has
+# The separate UEFI VM covers a real UKI, ESP, and slot selection. Not tested
+# here: firmware binding (a real GPU / a real WiFi radio) -- QEMU has
 # neither, and no VM ever will; that is the one gap this project's design
 # record accepts and closes with a supervised human boot instead.
 
-{ pkgs, nixpkgs, nixrescueModule, nixfsModule, mkMaintainer }:
+{ pkgs, nixpkgs, nixrescueModule, nixfsModule }:
 
 let
   # A trivial stand-in for the consumer-supplied GUI package -- proves the
@@ -34,20 +31,6 @@ let
   guiStandIn = pkgs.writeShellApplication {
     name = "nixrescue-test-session";
     text = ''echo "nixrescue-test-session: a real consumer points this at its own compositor"'';
-  };
-
-  # A stand-in "rescue toplevel" for lib.mkMaintainer -- proves the
-  # materialise-onto-a-cold-medium mechanism (mksquashfs the closure, fit
-  # check, dd onto the raw device) without paying for a second full NixOS
-  # evaluation inside this test. What gets squashed doesn't need to BE a
-  # rescue system for the mechanism itself to be genuine.
-  materializeStandIn = pkgs.hello;
-
-  maintainer = mkMaintainer {
-    inherit pkgs;
-    name = "vm-test";
-    toplevel = materializeStandIn;
-    device = "/dev/vdc";
   };
 
   testPassphrase = "nixrescue-test-passphrase";
@@ -62,6 +45,12 @@ pkgs.testers.nixosTest {
       enable = true;
       builtAt = "2026-07-28T00:00:00Z";
       authorizedKeys = [ "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItest test-operator-key" ];
+      ssh = {
+        enable = true;
+        # The direct-boot VM has no UEFI stub or TPM-sealed global credential. Production keeps
+        # this at its secure default; this test exercises only the ordinary sshd/key wiring.
+        tpm2Credential = false;
+      };
       gui.package = guiStandIn;
     };
 
@@ -74,16 +63,13 @@ pkgs.testers.nixosTest {
       tools.throughput.enable = false;
     };
 
-    environment.systemPackages = [ maintainer.script ];
-
     # Not built-in on every kernel config profile; explicit rather than
     # assumed, since a missing module here would fail this test for a
     # reason that has nothing to do with what it's actually checking.
     boot.kernelModules = [ "squashfs" "dm-crypt" "dm_mod" ];
 
-    # vdb: the synthetic broken disk (LUKS + btrfs) the test carves up by
-    # hand below. vdc: lib.mkMaintainer's own materialisation target.
-    virtualisation.emptyDiskImages = [ 300 300 ];
+    # vdb is the synthetic broken disk (LUKS + btrfs) carved up below.
+    virtualisation.emptyDiskImages = [ 300 ];
     virtualisation.memorySize = 1024;
     virtualisation.cores = 2;
   };
@@ -146,20 +132,5 @@ pkgs.testers.nixosTest {
         machine.succeed("umount /mnt/nixrescue-test")
         machine.succeed("cryptsetup close nixrescue-test-broken")
 
-    with subtest("lib.mkMaintainer writes its pre-built, bootable lower-store image straight to the device"):
-        machine.succeed("test -b /dev/vdc")
-        machine.succeed("test -r ${maintainer.image}")
-        machine.succeed("nixrescue-maintain-vm-test")
-
-        # A second run against an unchanged toplevel must be a no-op --
-        # proves the stamp-file guard, not just the happy path.
-        out = machine.succeed("nixrescue-maintain-vm-test")
-        assert "unchanged" in out, out
-
-        machine.succeed("mkdir -p /mnt/nixrescue-materialized")
-        machine.succeed("mount -t squashfs -o ro /dev/vdc /mnt/nixrescue-materialized")
-        machine.succeed("test -f /mnt/nixrescue-materialized/nix-path-registration")
-        machine.fail("test -d /mnt/nixrescue-materialized/nix/store")
-        machine.succeed("umount /mnt/nixrescue-materialized")
   '';
 }
