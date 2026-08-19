@@ -9,6 +9,14 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+
+    # GitHub's own default is 360 minutes. This job's recorded wall clock is 5-8 minutes (p95 is
+    # about 8), so ~3x that is the real budget and everything past it is a hang, not slowness --
+    # most plausibly a qemu that never reaches multi-user.target inside one of the VM checks.
+    # Left at the default, such a hang holds a runner and a concurrency slot for six hours and
+    # reports nothing; bounded here, it reports a fast, unambiguous red.
+    timeout-minutes: 30
+
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v27
@@ -27,5 +35,15 @@ jobs:
       #
       # `systems` in flake.nix is deliberately narrow so this can be strict: only platforms that
       # can genuinely be evaluated are declared, and all of them really are.
+      #
+      # --keep-going is the same argument applied one level down. This flake's checks are
+      # independent of one another — the eval contract, two nixosTests of different boot paths, a
+      # reconciler VM, a shellcheck boundary, an image-fits-its-slot size gate — and Nix's default
+      # is to abandon every derivation still outstanding the moment one of them fails. A single
+      # broken VM check then hides the state of all the others, and the next run only reveals
+      # whichever failure happens to surface first, one round trip at a time. With --keep-going
+      # every check that CAN run DOES run and reports its own result, and the build still exits
+      # non-zero listing exactly which ones failed. This suppresses nothing: a red check is still
+      # red, it simply no longer takes the unrelated checks down with it.
       - name: nix flake check (all systems)
-        run: nix flake check --all-systems --print-build-logs
+        run: nix flake check --all-systems --keep-going --print-build-logs
