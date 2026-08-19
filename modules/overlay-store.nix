@@ -163,11 +163,11 @@ in
     # `sleep` is load-bearing for the bounded kernel-device discovery wait and is not guaranteed
     # by the minimal initrd PATH, so make the coreutils dependency explicit.
     path = [ pkgs.coreutils pkgs.util-linux ];
-    # `blkid` is deliberately NOT used to find the ESP: `/dev/disk/by-label/NIXRESCUE` is the same
-    # udev-populated symlink a `blkid` query would have had to resolve anyway -- exactly how the
-    # slot partitions below are already found, via by-partlabel, with no extra binary either. One
-    # fewer tool in an image sized to a fixed slot budget, for behaviour that is otherwise
-    # identical to the classic-stage-1 script this replaces.
+    # The ESP is taken from `espDevice` exactly as declared and is never searched for by label:
+    # a `/dev/disk/by-label/NIXRESCUE` lookup would only re-introduce the very udev dependency the
+    # PARTLABEL resolution below exists to be rid of. `blkid` and `lsblk` ARE used below, but only
+    # to read a partition's own GPT name off devices this configuration already names -- and both
+    # ship inside the util-linux already listed above, so the image gains nothing to carry.
     script = ''
       echo "nixrescue: resolving which cold-mode slot to boot from"
       mkdir -p /mnt-esp /mnt-slot-probe
@@ -264,6 +264,68 @@ in
         return 0
       }
 
+      # -- resolving the preferred PARTLABEL without ever consulting udev --------------------
+      #
+      # This used to read `/dev/disk/by-partlabel/$pointer` straight off the filesystem, and that
+      # was a race rather than a shortcut. Everything under `/dev/disk/` is created by udev, yet
+      # this unit is ordered only after `systemd-modules-load.service`, and the discovery wait
+      # above is satisfied by the kernel's own devtmpfs nodes -- a `slotDevices` list of raw
+      # partition nodes (which is exactly what the UEFI boot check declares) needs no udev at all,
+      # so the wait returns while udev is still working. The read could therefore happen before
+      # that symlink existed: the preference silently read as "absent", the resolver fell through
+      # to first-available probing, and on a medium whose other slot is ALSO digest-valid it
+      # mounted the wrong slot. Winning that race is not a passing test, merely a lucky one.
+      #
+      # `blkid -p` is a LOW-LEVEL probe. It consults neither the blkid cache nor the udev
+      # database, reading the GPT entry out of the partition table itself, so it answers correctly
+      # the instant the kernel has published the partition -- no ordering edge required against
+      # anything that does not already gate this unit. `lsblk` is kept as a second opinion for a
+      # device whose name blkid declines to report; both live in the util-linux already on this
+      # unit's PATH, so neither costs the image a byte.
+      #
+      # Confining the search to the declared `slotDevices` is deliberate on top of that: a
+      # preference may only ever choose AMONG the slots this UKI declares, never name some
+      # arbitrary partition elsewhere on the machine. It also means the selector -- and so what
+      # finally lands in /proc/self/mountinfo -- is the declared slot device itself rather than a
+      # symlink into /dev/disk.
+      partlabelOf() {
+        probed=$(blkid -p -s PART_ENTRY_NAME -o value "$1" 2>/dev/null) || probed=""
+        if [ -z "$probed" ]; then
+          probed=$(lsblk -dn -o PARTLABEL "$1" 2>/dev/null) || probed=""
+        fi
+        printf '%s' "$probed" | tr -d ' \t\r\n'
+      }
+
+      slotForPartlabel() {
+        for device in ${lib.concatMapStringsSep " " lib.escapeShellArg cfg.slotDevices}; do
+          [ -b "$device" ] || continue
+          if [ "$(partlabelOf "$device")" = "$1" ]; then
+            printf '%s' "$device"
+            return 0
+          fi
+        done
+        return 1
+      }
+
+      # The wait above returns as soon as the FIRST declared slot is present, which is not at all
+      # the same as every declared slot being present -- with by-partlabel `slotDevices` udev
+      # publishes them one worker at a time. A preference naming a slot that is merely LATE must
+      # not be mistaken for one naming a slot that is ABSENT, so spend what is left of the same
+      # bounded discovery budget looking for it. A genuinely stale pointer still falls back to
+      # probing at the end of that budget instead of hanging the boot.
+      resolvePreferredSlot() {
+        attempts=$remaining
+        while :; do
+          if found=$(slotForPartlabel "$1"); then
+            printf '%s' "$found"
+            return 0
+          fi
+          [ "$attempts" -gt 0 ] || return 1
+          sleep 1
+          attempts=$((attempts - 1))
+        done
+      }
+
       chosen=""
       if [ -n "$pointer" ]; then
         case "$pointer" in
@@ -271,10 +333,10 @@ in
             echo "nixrescue: ignoring invalid preferred PARTLABEL '$pointer'" >&2
             ;;
           *)
-            candidate="/dev/disk/by-partlabel/$pointer"
-            if [ -e "$candidate" ] && trySlot "$candidate"; then
+            candidate=$(resolvePreferredSlot "$pointer") || candidate=""
+            if [ -n "$candidate" ] && trySlot "$candidate"; then
               chosen="$candidate"
-              echo "nixrescue: preference names compatible slot '$pointer' -- honoured"
+              echo "nixrescue: preference names compatible slot '$pointer' at $candidate -- honoured"
             else
               echo "nixrescue: preference '$pointer' is absent or incompatible with $init_path -- probing" >&2
             fi
